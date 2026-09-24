@@ -1,0 +1,5 @@
+# 仓库内容与工作区逐字节一致:
+# 本工程源码是 GBK 编码 + CRLF 换行, 不做任何换行符/编码规范化, 避免 diff 出现整文件变更
+* -text
+*.uvprojx -text
+*.uvoptx -text

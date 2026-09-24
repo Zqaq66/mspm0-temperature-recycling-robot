@@ -1,0 +1,46 @@
+# ===========================================================================
+#  DZZH_Project —— git 忽略规则
+#  原则: 只跟踪"人写的/配置的"文件; 编译产物、Keil 界面状态、手工备份都不进仓库
+# ===========================================================================
+
+# ---- Keil MDK 编译产物 ----
+keil/Objects/
+keil/Listings/
+keil/DebugConfig/
+*.o
+*.d
+*.crf
+*.axf
+*.elf
+*.hex
+*.map
+*.lst
+*.lnp
+*.dep
+*.build_log.htm
+*.htm
+*.i
+*.sct.bak
+
+# ---- Keil 用户/界面状态 (机器相关, 换机器会自动重建) ----
+*.uvguix.*
+*.uvoptx
+*.uvopt
+*.Scratchpad
+
+# ---- 手工备份文件 (已被 git 取代) ----
+*.bak
+*.bak[0-9]*
+*.bk
+*.orig
+*.rej
+*~
+
+# ---- 系统/编辑器杂项 ----
+Thumbs.db
+desktop.ini
+.DS_Store
+__pycache__/
+*.pyc
+.vscode/
+.idea/
