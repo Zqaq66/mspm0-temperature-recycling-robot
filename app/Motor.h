@@ -14,7 +14,8 @@ void Motor_Front_A(int PWMA);               /* 单路 (0=制动) */
 void Motor_Front_B(int PWMB);
 void Motor_Front_C(int PWMC);
 void Motor_Front_D(int PWMD);
-void Motor_Stop(void);                      /* 四路停 + 方向脚清零 */
+void Motor_Stop(void);
+void Motor_Brake(void);                     /* 短路制动: 停得住 (区别于 Stop 的滑行) */                      /* 四路停 + 方向脚清零 */
 void Motor_Enable(void);                    /* STBY=1, 使能 TB6612 (先把 PWM/方向清零) */
 
 /* 循迹用: 左右两侧一起给 (左 = A左前 + D左后, 右 = B右前 + C右后), 内部限幅 ±999

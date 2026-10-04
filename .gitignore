@@ -44,3 +44,6 @@ __pycache__/
 *.pyc
 .vscode/
 .idea/
+
+# ---- 备用备份命名 (*.bak_key 等) ----
+*.bak_*

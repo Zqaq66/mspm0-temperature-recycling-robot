@@ -204,6 +204,29 @@ void Motor_Front_D(int PWMD)
 	 }
 }
 
+/*---------------------------------------------------------------------------
+ * TB6612 短路制动: 四个通道 IN1=IN2=1 且 PWM=0
+ *   -> 电机绕组被下桥短路, 反电动势产生制动转矩, "电刹车"
+ * 和 Motor_Stop() 的区别:
+ *   Motor_Stop()  = IN1=IN2=0 = 输出关断 -> 电机**自由滑行**(靠摩擦慢慢停)
+ *   Motor_Brake() = IN1=IN2=1 + PWM=0   -> **电磁制动**, 停得住
+ * 用途: IMU 原地转到位后要立刻停住 (滑行会带着车继续转过去, 变成来回摆)
+ * 注意: 只在低速时用 (比如这里的末段), 高速急刹电流大、对齿轮冲击也大
+ *-------------------------------------------------------------------------*/
+void Motor_Brake(void)
+{
+	/* TB6612 短路制动 = IN1=IN2=1 且 PWM 给满。
+	 * 注: 之前写的 "PWM=0 + IN1=IN2=1" 有歧义 (TB6612 手册 PWM=L 一路的输出状态各家理解不一),
+	 *     给满 PWM 后, 无论按哪种真值表读法结果都是短路制动, 不会再"滑行着多转几度"。 */
+	DL_TimerG_setCaptureCompareValue(Motor_PWM_Front_INST, 1000, GPIO_Motor_PWM_Front_C0_IDX);
+	DL_TimerG_setCaptureCompareValue(Motor_PWM_Front_INST, 1000, GPIO_Motor_PWM_Front_C1_IDX);
+	DL_TimerG_setCaptureCompareValue(Motor_PWM_Back_INST,  1000, GPIO_Motor_PWM_Back_C0_IDX);
+	DL_TimerG_setCaptureCompareValue(Motor_PWM_Back_INST,  1000, GPIO_Motor_PWM_Back_C1_IDX);
+
+	DL_GPIO_setPins(Motor_PORT, Motor_AIN1_PIN|Motor_AIN2_PIN|Motor_BIN1_PIN|Motor_BIN2_PIN
+	                          |Motor_CIN1_PIN|Motor_CIN2_PIN|Motor_DIN1_PIN|Motor_DIN2_PIN);
+}
+
 void Motor_Stop(void)
 {
 	DL_GPIO_clearPins(Motor_PORT,Motor_AIN1_PIN);

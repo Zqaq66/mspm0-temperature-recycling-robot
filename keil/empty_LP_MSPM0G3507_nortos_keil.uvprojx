@@ -500,6 +500,16 @@
               <FilePath>..\middle\Key.h</FilePath>
             </File>
             <File>
+              <FileName>ImuTurn.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\middle\ImuTurn.c</FilePath>
+            </File>
+            <File>
+              <FileName>ImuTurn.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\middle\ImuTurn.h</FilePath>
+            </File>
+            <File>
               <FileName>LORA.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\middle\LORA.c</FilePath>

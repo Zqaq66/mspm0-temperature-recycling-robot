@@ -45,10 +45,12 @@
  *   ÖÜÆÚ     Ñ­¼£Ä£Ê½ (TRACK)                      µç»ú²âÊÔÄ£Ê½ (MOTOR_TEST)
  *   --------------------------------------------------------------------------------------
  *   5ms      Track_Run(): ¶Á»Ò¶È+ÖÊÐÄ+PD+Ð´PWM     ¡ª
- *   10ms     Key_Scan(): µ¥»÷ÆôÍ£ / ³¤°´µ÷ËÙ        Í¬×ó (µ÷µÄÊÇ±Õ»·Ä¿±ê)
- *   20ms     Ö»²ÉÑù±àÂëÆ÷, ²»Ð´ PWM                 ¿ª»·½×¶Î±í / ËÄÂ·±Õ»·ËÙ¶È»·, Ð´ PWM
+ *   10ms     ´¦Àí°´¼üÊÂ¼þ: µ¥»÷ÆôÍ£ / ³¤°´µ÷ËÙ      Í¬×ó (µ÷µÄÊÇ±Õ»·Ä¿±ê)
+ *            (Key_Scan() ±¾ÉíÔÚ 1ms ÖÐ¶Ï¹³×ÓÀïÅÜ, ÊÂ¼þ»º´æºóÕâÀïÈ¡×ß)
+ *   20ms     ±àÂëÆ÷²ÉÑù + IMU ½âÎö                   ¿ª»·½×¶Î±í / ËÄÂ·±Õ»·ËÙ¶È»·, Ð´ PWM
  *   100ms    LCD_track()                           ½×¶ÎÍÆ½ø + LCD_status()
  *   1000ms   ´®¿ÚÈÕÖ¾ (Ä¬ÈÏÕû¶Î×¢ÊÍµô)              Í¬×ó
+ *   ×¢: 5ms ²ÛÔÚ IMU ×ªÏò/±£ÏòÃ¦Ê±¸ÄÅÜ ImuTurn_Update() ¡ª¡ª Á½Õß²»»áÍ¬Ê±Ð´ PWM
  *   Ê±»ù: TIMER_0 = 1ms ÖÐ¶Ï -> Get_Time();  printf ³ö¿Ú = LORA ¿Ú UART3 (PB2/PB3, 9600)
  *
  * ============================ [3] °åÔØ°´¼ü (Ö»ÓÃ S2 = PB21, ÎÞÐè½ÓÏß) ============================
@@ -117,7 +119,15 @@
  *     SCLK -> PB9     SDA/MOSI -> PB8     RES -> PB10
  *     DC   -> PB11    CS -> PB14          BLK -> PB26      VCC -> 3V3, GND -> ¹²µØ
  *
- *   [4.7] ÉÏµçÇ°¼ì²é
+ *   [4.7] IMU (YbIMU ÁùÖá, ×ËÌ¬/×ªÏòÓÃ)
+ *     VCC -> 3V3     GND -> ¹²µØ
+ *     TX  -> PA8     RX  -> PA9     (Ä£¿é TX ½Ó MCU RX, ½»²æ½Ó)
+ *     - ÓÃ UART1, 115200-8-N-1, 25Hz ×Ô¶¯ÉÏ±¨ (0x7E 0x23 Ö¡); RX ÄÚ²¿ÉÏÀ­ÒÑ¿ª
+ *     - Çý¶¯ app/imu_uart_driver.c/.h (ÕÕ°á Competition_PJ/BSP/IMU, Ö»°Ñ delay.h »»³É Time.h)
+ *     - ÆÁÉÏµÚ7ÐÐ "YAW xxx RXn": RX = Ã¿ 100ms ÊÕµ½µÄ×Ö½ÚÊý, Õý³£Ô¼ 70~80;
+ *       ºãÎª 0 ËµÃ÷Ã»½ÓºÃ / TX-RX Ã»½»²æ / ²¨ÌØÂÊ²»¶Ô
+ *
+ *   [4.8] ÉÏµçÇ°¼ì²é
  *     1) ÍòÓÃ±íÁ¿ VM-GND / VCC-GND ²»¶ÌÂ·; VCC Êµ²â 3.3V, VM Êµ²â 12V
  *     2) µç³Ø¸º Óë LaunchPad GND µ¼Í¨ (¹²µØ)
  *     3) ËÄ¸öÂÖ×ÓÐü¿ÕÔÙÉÏµç
@@ -145,6 +155,7 @@
  *           µÚ4ÐÐ RÓÒÂÖPWM
  *           µÚ5ÐÐ STOP press S2 / LOST nnn(¶ªÏßÊ±³¤ ms) / RUN Bxxx(°´¼üÉè¶¨µÄ»ù´¡ËÙ¶È)
  *           µÚ6ÐÐ I2CERR (±ØÐëºãÎª 0, ·Ç 0 = I2C Ã»Í¨)
+ *           µÚ7ÐÐ YAW ½Ç¶È(¶È) + RX Ã¿100msÊÕµ½µÄIMU×Ö½ÚÊý (0 = IMU Ã»Êý¾Ý)
  *   µ÷²Î:   È«²¿ÔÚ middle/XunJi.c ¶¥²¿ (ÖÊÐÄãÐÖµ/¼«ÐÔ/¾µÏñ/LR¡¢PD Óë¹ý¶É´ø¡¢D µÍÍ¨¡¢
  *           ½µËÙ±È¡¢¶ªÏß²ÎÊý) ¡ª¡ª ¼û [7] µÄË³Ðò
  *   ×¢:     Ñ­¼£ÓÃµÄÊÇ¿ª»· PWM; Ïë½Ó±àÂëÆ÷ËÙ¶È»·, °Ñ Motor_SetLeft/RightPWM() »»³ÉÐ´
@@ -170,7 +181,27 @@
  *
  *   µ÷²ÎÈë¿Ú: empty.c µÄ TARGET_SPEED ºÍ steps[] ±í; middle/PID.c µÄ Velocity_Kp/Ki/Kd
  *
- * ============================ [7] µ÷²ÎË³Ðò (°´Õâ¸öË³ÐòÀ´, Ò»´ÎÖ»¸ÄÒ»¸ö) ============================
+ * ============================ [7] IMU ×ªÏò / ±£Ïò API (middle/ImuTurn.c) ============================
+ *   Á½¸ö¶¯×÷, ¶¼¿¿ yaw ±Õ»·, ¶¼¡¾¶ÀÕ¼µç»ú¡¿¡ª¡ª Ã¦µÄÊ±ºòÑ­¼£×Ô¶¯ÈÃ³ö (¼û [2] µÄ×¢):
+ *     ImuTurn_TurnDeg(delta_deg, speed)   Ô­µØ²îËÙ×ªµ½Ö¸¶¨½Ç¶È, µ½Î»×Ô¶¯Í£³µ
+ *                                         delta_deg Õý=×ó×ª(ÄæÊ±Õë); speed Ðý×ª PWM (0 -> 300)
+ *     ImuTurn_HoldAbs(abs_yaw, speed)     ±£³Ö¾ø¶Ôº½Ïò: speed>0 ±ß×ß±ßÐÞ, speed=0 Ô­µØËø½Ç
+ *   ¸¨Öú:
+ *     ImuTurn_IsBusy()        1 = Ã¦ (5ms/20ms ÈÎÎñ¾Ý´ËÈÃ³öµç»ú)
+ *     ImuTurn_JustFinished()  ±¾ÅÄ¸Õ½áÊø (¶ÁºóÇåÁã); ImuTurn_GetDoneReason() ¿´Ô­Òò
+ *     ImuTurn_Stop()          ¼±Í£/·ÅÆú;  ImuTurn_GetYaw/GetDiff/GetTarget()  µ÷ÊÔ
+ *     ImuTurn_SetDoneCallback(cb)         Íê³É»Øµ÷, ÔÚÀïÃæ×öÏÂÒ»²½¶¯×÷
+ *   ½áÊøÔ­Òò: ARRIVED(µ½Î») / STOPPED(±»Í£) / IMU_OFF(µôÏß×Ô¶¯Í£) / TIMEOUT(³¬Ê±×Ô¶¯Í£)
+ *   ÓÃ·¨Ê¾Àý:
+ *     if (ImuTurn_TurnDeg(+90, 0) == 0) { }          // ×ó×ª 90 ¶È (0 = ÓÃ IMU_TURN_SPEED_MAX), 5ms ÈÎÎñ»á×Ô¼ºÍÆ
+ *     if (ImuTurn_JustFinished()) { ÏÂÒ»²½; }         // ÂÖÑ¯Íê³É (»òÔÚ»Øµ÷Àï×ö)
+ *     ImuTurn_HoldAbs(90.0f, 250);                   // ±£³Ö 90 ¶Èº½ÏòÍùÇ°×ß
+ *   µ÷²Î: middle/ImuTurn.h ¶¥²¿ ¡ª¡ª ×ªÏòÖ»Òªµ÷ IMU_TURN_LEAD_DEG (ÌáÇ°É²³µ½Ç) ºÍ IMU_TURN_SPEED_MAX
+ *   ¿´ÏÖÏó: ÆÁµÚ 7 ÐÐ×ªÏòÊ±±ä³É "Y µ±Ç°½Ç E Ê£Óà½Ç W ½ÇËÙ¶È(¶È/Ãë)"; Æ½Ê±ÊÇ "YAW xxx RXn"
+ *   ÑÝÊ¾: °Ñ±¾ÎÄ¼þ¶¥²¿µÄ IMU_TURN_DEMO ¸Ä³É 1 -> µ¥»÷ S2 ºó×Ô¶¯ÅÜ
+ *         "Ô­µØ×ó×ª 90 -> ±£³Ö¸Ãº½ÏòÖ±ÐÐ 2s -> Í£³µ"
+ *
+ * ============================ [8] µ÷²ÎË³Ðò (°´Õâ¸öË³ÐòÀ´, Ò»´ÎÖ»¸ÄÒ»¸ö) ============================
  *
  *   0) ÏÈ¶¨·½Ïò ¡ª¡ª »¹Ã»µ½µ÷ PID Õâ²½:
  *        Ä³ÂÖ×ªÏòÓëÖ¸ÁîÏà·´             -> app/Motor.c     MOTOR_A/B/C/D_REVERSE ¸Ä 1
@@ -231,6 +262,8 @@
 #include "PID.h"
 #include "XunJi.h"          /* Ñ­¼£²ã: Track_Init/Track_Run */
 #include "Key.h"            /* °åÔØ°´¼ü: ËÙ¶ÈÔÚÏß¿Éµ÷ */
+#include "imu_uart_driver.h"/* IMU: YbIMU UART Çý¶¯ (UART1 PA8=TX/PA9=RX) */
+#include "ImuTurn.h"        /* IMU ×ªÏò/±£Ïò: ×ªµ½Ö¸¶¨½Ç¶È / ±£³ÖÖ¸¶¨½Ç¶È */
 
 #define TARGET_SPEED   40       /* ±Õ»·Ä¿±ê: ±àÂëÆ÷¼ÆÊý / 20ms (ÏÈ¸øÐ¡µÄ, °´Êµ²âµ÷) */
 
@@ -252,6 +285,109 @@ uint8_t app_mode = APP_MODE;
  * 0 = Í£ (ÉÏµçÄ¬ÈÏ): µç»úÊä³öÈ« 0, Ñ­¼£²»ÅÜ, ÆÁÉÏÏÔÊ¾ STOP
  * 1 = ÅÜ: Ñ­¼£ / µç»ú²âÊÔ°´¸÷×ÔÁ÷³Ì×ß */
 uint8_t app_run = 0;
+
+/* IMU ×ªÏò/±£Ïò"¸Õ½áÊø"±êÖ¾: ÓÉ 5ms ÈÎÎñÔÚ ImuTurn_JustFinished() Ê±ÖÃ 1,
+ * Ó¦ÓÃ²ãÓÃÍê×Ô¼ºÇå 0 (Íê³ÉÔ­Òò¿´ ImuTurn_GetDoneReason()) */
+uint8_t imu_turn_done = 0;
+
+/* ---- Õï¶ÏÐÐ¿ª¹Ø: 1 = µÚ6ÐÐÏÔÊ¾ I/L/K (I2C´íÎó/Ö÷Ñ­»·¼ä¸ô/°´¼üÉ¨ÃèÂÊ), 0 = ÏÔÊ¾ I2CERR */
+#define LCD_DIAG        1
+
+/*---------------------------------------------------------------------------
+ * 1ms ÖÐ¶Ï¹³×Ó: °´¼üÉ¨Ãè·ÅÕâÀï
+ *   Ö÷Ñ­»·ÊÇÐ­×÷Ê½µÄ, LCD Ë¢Ò»ÆÁÒª¼¸Ê® ms¡¢´®¿Ú printf Ò»ÐÐÒª¼¸Ê® ms,
+ *   ÕâÐ©¶¼»á°Ñ 10ms ÈÎÎñÍÏµ½¼¸Ê® ms Ò»´Î ¡ª¡ª °´¼ü·ÅÔÚÈÎÎñÀïÉ¨¾Í»áÂ©µô¿ìËÙµ¥»÷¡£
+ *   ·Å 1ms ¶¨Ê±Æ÷ÖÐ¶ÏÀïÉ¨, Ö÷Ñ­»·ÔÙÔõÃ´¿¨Ò²²»»áÂ©°´¡£
+ *   ÊÂ¼þ»º´æµ½ key_ev_pending, ÓÉ APP_Task_10ms() È¡×ß´¦Àí¡£
+ *-------------------------------------------------------------------------*/
+volatile int      key_ev_pending = 0;   /* °´¼üÊÂ¼þ»º´æ (ÖÐ¶ÏÀï»ò, 10ms ÈÎÎñÀïÇåÁã) */
+volatile uint16_t key_scan_cnt   = 0;   /* °´¼üÉ¨Ãè´ÎÊýÀÛ¼Æ (Õï¶ÏÓÃ: Ã¿100msÓ¦¡Ö100) */
+volatile uint16_t app_loop_ms    = 0;   /* 5ms ÈÎÎñÊµ¼Ê¼ä¸ô (Õï¶ÏÓÃ: Õý³£=5, ±ä´ó=Ö÷Ñ­»·±»¿¨) */
+
+void APP_SysTick_Hook(void)
+{
+    key_ev_pending |= Key_Scan();       /* 1ms Ò»´Î, ·µ»Ø 0 »òÊÂ¼þÎ» */
+    key_scan_cnt++;
+}
+
+/* ---- IMU ×ªÏòÑÝÊ¾¿ª¹Ø ----
+ * 1 = ±à½ø¹Ì¼þ: µ¥»÷ S2 ¿ªÊ¼ºó×Ô¶¯ÅÜÒ»±é
+ *       Ô­µØ×ª IMU_TURN_DEMO_DEG ¶È (Õý=×ó/ÄæÊ±Õë, ¸º=ÓÒ/Ë³Ê±Õë)
+ *       -> ÔÙ·´Ïò×ªÍ¬Ñù½Ç¶È (IMU_TURN_DEMO_BACK=1, ÑéÖ¤·´·½Ïò + ´Ó·ÇÁã½Ç¶ÈÆð²½)
+ *       -> Ô­µØËø×¡¸Ã½Ç¶È 2s (speed=0, ³µ²»¶¯) -> Í£³µ
+ *       Òª²â 180 ¶È: °ÑÏÂÃæ IMU_TURN_DEMO_DEG ¸Ä³É 180 ¾ÍÐÐ (ÌáÇ°É²³µ½Ç²»ÓÃÖØµ÷)
+ * Ö»ÓÃÓÚÌ¨¼ÜÑéÖ¤ ImuTurn µÄ½Ó¿Ú, ÕýÊ½ÅÜ¸Ä»Ø 0 (ÑÝÊ¾ÆÚ¼äÑ­¼£²»²ÎÓë) */
+#define IMU_TURN_DEMO   1
+#define IMU_TURN_DEMO_DEG  90    /* ÑÝÊ¾×ª¶àÉÙ¶È: 90 »ò 180 »ò -90 »ò -180 (ÌáÇ°É²³µ½ÇÍ¨ÓÃ) */
+#define IMU_TURN_DEMO_BACK  1    /* 1 = ×ªÍêÔÙ¡¾·´Ïò¡¿×ªÍ¬Ñù½Ç¶È (ÑéÖ¤·´·½Ïò + ´Ó·ÇÁã½Ç¶ÈÆð²½) */
+
+#if IMU_TURN_DEMO
+static void App_ImuTurnDemo(void)
+{
+    static uint8_t  step = 0;
+    static uint32_t t0   = 0;
+
+    if (!app_run)                              /* Í£Ö¹ -> ÑÝÊ¾¸´Î» */
+    {
+        step = 0;
+        return;
+    }
+
+    switch (step)
+    {
+    case 0:                                    /* Æð²½: Ô­µØ×ó×ª IMU_TURN_DEMO_DEG ¶È */
+        if (!ImuTurn_IsBusy() && (ImuTurn_TurnDeg(IMU_TURN_DEMO_DEG, 0) == 0))
+            step = 1;
+        break;
+
+    case 1:                                    /* µÚÒ»×ªµ½Î» */
+        if (imu_turn_done)
+        {
+            imu_turn_done = 0;
+            /* Ì¨¼ÜÊý¾Ý: ½áÊøÔ­Òò(0=µ½Î» 3=³¬Ê± 4=Ô½×ßÔ½Ô¶) / Ä¿±ê / Âäµã / ÂäµãÎó²î */
+            printf("TURN1 done: reason=%d target=%d yaw=%d err=%d\r\n",
+                   ImuTurn_GetDoneReason(), (int)ImuTurn_GetTarget(),
+                   (int)ImuTurn_GetYaw(), (int)ImuTurn_GetDiff());
+#if IMU_TURN_DEMO_BACK
+            /* ÔÙ¡¾·´Ïò¡¿×ªÍ¬Ñù½Ç¶È: Õâ´ÎÆðµãÊÇ¸ö·ÇÁã½Ç¶È, ÓÃÀ´ÑéÖ¤"ÈÎÒâ½Ç¶ÈÆð²½ + ·´Ïò" */
+            if (!ImuTurn_IsBusy() && (ImuTurn_TurnDeg(-IMU_TURN_DEMO_DEG, 0) == 0))
+                step = 2;
+#else
+            t0 = Get_Time();
+            ImuTurn_HoldAbs(ImuTurn_GetYaw(), 0);
+            step = 3;
+#endif
+        }
+        break;
+
+#if IMU_TURN_DEMO_BACK
+    case 2:                                    /* µÚ¶þ×ª(·´Ïò)µ½Î» -> Ô­µØËø½Ç 2s */
+        if (imu_turn_done)
+        {
+            imu_turn_done = 0;
+            printf("TURN2 done: reason=%d target=%d yaw=%d err=%d\r\n",
+                   ImuTurn_GetDoneReason(), (int)ImuTurn_GetTarget(),
+                   (int)ImuTurn_GetYaw(), (int)ImuTurn_GetDiff());
+            t0 = Get_Time();
+            ImuTurn_HoldAbs(ImuTurn_GetYaw(), 0);   /* 0 = Ô­µØËø½Ç, ³µÂÖ²»×ª */
+            step = 3;
+        }
+        break;
+#endif
+
+    case 3:                                    /* ±£³Ö 2s -> Í£³µ */
+        if ((Get_Time() - t0) >= 2000)
+        {
+            ImuTurn_Stop();
+            step = 4;
+        }
+        break;
+
+    default:
+        break;
+    }
+}
+#endif
 
 /* ¿ª»·²âÊÔ²½Öè: {A, B, C, D, ³ÖÐøÊ±¼äms, ½×¶ÎÃû} */
 typedef struct {
@@ -293,7 +429,69 @@ static int target_speed = TARGET_SPEED;           /* ±Õ»·Ä¿±ê, µç»úÄ£Ê½ÏÂ°´¼ü¿Éµ
 int Target_A=TARGET_SPEED,Target_B=TARGET_SPEED,Target_C=TARGET_SPEED,Target_D=TARGET_SPEED;
 
 /*---------------------------------------------------------------------------
- * LCD ×´Ì¬ÏÔÊ¾ (Ö»Ë¢ 6 ÐÐÎÄ×Ö, ²»×öÕûÆÁË¢ÐÂ, ÃâµÃÍÏÂý 20ms »·)
+ * LCD ÐÐÊä³ö (Í³Ò»Èë¿Ú, ·ÀÖ¹Ó¡µ½ÆÁÍâ)
+ *   ÆÁ: 128 x 160 (USE_HORIZONTAL=1), 16 ºÅ×Ö = 8 px ¿í -> Ò»ÐÐ¶¥¶à 16 ¸ö×Ö·û¡£
+ *   ¹æÔò: ²»×ã 16 ×Ö·û²¹¿Õ¸ñ(¸ÇµôÉÏÒ»Ö¡µÄ²Ð×Ö), ³¬¹ý 16 ×Ö·û½Ø¶Ï(²»È»»áÓ¡³öÆÁÍâ¿´²»µ½)¡£
+ *   ËùÓÐ LCD ÎÄ×ÖÐÐ¶¼×ßÕâ¸öº¯Êý, ±ðÖ±½Ó LCD_ShowString¡£
+ *-------------------------------------------------------------------------*/
+#define LCD_COLS   16
+static void lcd_row(int y, char *buf, unsigned fc)
+{
+    int n = 0;
+
+    while (buf[n] != 0 && n < LCD_COLS) n++;      /* ÕÒ½áÎ², »òÒÑµ½ 16 */
+    while (n < LCD_COLS) buf[n++] = ' ';          /* ²¹Æë */
+    buf[LCD_COLS] = 0;
+
+    LCD_ShowString(0, (u16)y, (const u8 *)buf, fc, BLACK, 16, 0);
+}
+
+/*---------------------------------------------------------------------------
+ * LCD µÚ7ÐÐ: IMU ×´Ì¬ ¡ª¡ª YAW ½Ç¶È(¶È) + Ã¿ 100ms ÊÕµ½µÄ×Ö½ÚÊý
+ *   IMU ÒÔ 25Hz ÉÏ±¨, Ã¿Ö¡Ô¼ 30 ×Ö½Ú -> Õý³£Ê± RX ÏÔÊ¾ 70~80;
+ *   IMU Ã»½Ó / ½Ó·´ / ²¨ÌØÂÊ²»¶Ô -> RX ºãÎª 0 (YAW Ò²²»¶¯)
+ *-------------------------------------------------------------------------*/
+static void LCD_imu(void)
+{
+    static uint32_t last_rx = 0;
+    char     buf[24];
+    uint32_t rx = IMU_GetRxByteCount();
+    float    euler[3];
+    int      yaw = 0;
+    unsigned rx_delta = (unsigned)(rx - last_rx);
+
+    last_rx = rx;
+
+    if (IMU_GetEuler(euler) == 0)
+    {
+        /* °´ IMU_TURN_YAW_SIGN Ð£Õý²¢¹éÒ»»¯µ½ (-180,180]: ÆÁÉÏµÄ yaw ºÍÃüÁîÍ¬Ïò (+ = ×ó×ª),
+         * ¶øÇÒ´ÓÈÎÒâ½Ç¶ÈÆð¶¼²»»áÏÔÊ¾³É -350 ÕâÖÖÖµ¡£
+         * ×¢Òâ IMU Ô­Ê¼±¨ÖµµÄ·ûºÅÊÇÏà·´µÄ (ÂÞÅÌÊ½Ë³Ê±ÕëÎªÕý), ±ðÄÃÆÁÉÏµÄÊýÈ¥ºÍÉÏÎ»»ú¶Ô */
+        float y = euler[2] * (float)IMU_TURN_YAW_SIGN;
+        while (y >  180.0f) y -= 360.0f;
+        while (y < -180.0f) y += 360.0f;
+        yaw = (int)((y >= 0.0f) ? (y + 0.5f) : (y - 0.5f));
+    }
+
+    if (ImuTurn_IsBusy())                    /* ×ªÏò/±£ÏòÖÐ: yaw + Ê£Óà½Ç + ÏàÎ» + ½ÇËÙ¶È */
+    {
+        int w = (int)ImuTurn_GetRate();              /* ¼Ðµ½ +-99: Ò»ÐÐÖ»ÓÐ 16 ×Ö·û (Y/E ¸÷Õ¼ 5) */
+        if (w >  99) w =  99;
+        if (w < -99) w = -99;
+        sprintf(buf, "Y%+4d E%+4d %c%3d", yaw, (int)ImuTurn_GetDiff(),
+                ImuTurn_GetPhase(), w);   /* ÏàÎ»: D¶¨ËÙ CµÍËÙ R·´ÏòÖÆ¶¯ B¶Ïµç±£³Ö F²¹×ã */
+        lcd_row(136, buf, YELLOW);
+    }
+    else                                     /* Æ½Ê±: ÏÔÊ¾ RX, ÓÃÀ´¿´ IMU Í¨Ã»Í¨ */
+    {
+        if (rx_delta > 999) rx_delta = 999;
+        sprintf(buf, "YAW %+5d RX%3u", yaw, rx_delta);
+        lcd_row(136, buf, rx_delta ? GREEN : GRAY);
+    }
+}
+
+/*---------------------------------------------------------------------------
+ * LCD ×´Ì¬ÏÔÊ¾ (Ö»Ë¢ÎÄ×Ö, ²»×öÕûÆÁË¢ÐÂ, ÃâµÃÍÏÂý 20ms »·)
  *-------------------------------------------------------------------------*/
 static void LCD_status(void)
 {
@@ -302,23 +500,25 @@ static void LCD_status(void)
     if (!app_run)              sprintf(buf, "STOP  press S2 ");
     else if (stage >= STEP_NUM) sprintf(buf, "CLOSED LOOP    ");
     else                       sprintf(buf, "%2d %-11s", stage + 1, steps[stage].name);
-    LCD_ShowString(0,   0, (const u8 *)buf, app_run ? YELLOW : RED, BLACK, 16, 0);
+    lcd_row(0, buf, app_run ? YELLOW : RED);
 
-    sprintf(buf, "PWM A/B %4d %4d", PWMA, PWMB);
-    LCD_ShowString(0,  24, (const u8 *)buf, WHITE, BLACK, 16, 0);
+    sprintf(buf, "PWM A%4d B%4d", PWMA, PWMB);     /* 15 ×Ö·û */
+    lcd_row(24, buf, WHITE);
 
-    sprintf(buf, "PWM C/D %4d %4d", PWMC, PWMD);
-    LCD_ShowString(0,  40, (const u8 *)buf, WHITE, BLACK, 16, 0);
+    sprintf(buf, "PWM C%4d D%4d", PWMC, PWMD);     /* 15 ×Ö·û */
+    lcd_row(40, buf, WHITE);
 
-    sprintf(buf, "SPD A/B %4d %4d", A_speed, B_speed);
-    LCD_ShowString(0,  64, (const u8 *)buf, GREEN, BLACK, 16, 0);
+    sprintf(buf, "SPD A%4d B%4d", A_speed, B_speed);  /* 15 ×Ö·û */
+    lcd_row(64, buf, GREEN);
 
-    sprintf(buf, "SPD C/D %4d %4d", C_speed, D_speed);
-    LCD_ShowString(0,  80, (const u8 *)buf, GREEN, BLACK, 16, 0);
+    sprintf(buf, "SPD C%4d D%4d", C_speed, D_speed);  /* 15 ×Ö·û */
+    lcd_row(80, buf, GREEN);
  
     if (stage >= STEP_NUM) sprintf(buf, "TGT %4d CLOSED", Target_A);
     else                   sprintf(buf, "TGT ---- OPEN  ");
-    LCD_ShowString(0, 104, (const u8 *)buf, CYAN, BLACK, 16, 0);
+    lcd_row(104, buf, CYAN);
+
+    LCD_imu();                               /* µÚ7ÐÐ: IMU YAW + ÊÕ×Ö½ÚÊý */
 }
 
 /*---------------------------------------------------------------------------
@@ -332,27 +532,47 @@ static void LCD_track(void)
 
     for (i = 0; i < 8; i++) buf[i] = ((track_bits >> i) & 0x01) ? '.' : '#';
     buf[8] = ' '; buf[9] = ' '; buf[10] = 0;
-    LCD_ShowString(0,   0, (const u8 *)buf, GREEN, BLACK, 16, 0);
+    lcd_row(0, buf, GREEN);
 
     /* P = ÖÊÐÄÎ»ÖÃ(0~700, ÖÐÐÄ350), E = Îó²î(¸º=ÏßÆ«×ó) */
-    sprintf(buf, "P%3d E%+4d     ", track_pos, track_error);
-    LCD_ShowString(0,  24, (const u8 *)buf, YELLOW, BLACK, 16, 0);
+    sprintf(buf, "P%3d E%+4d", track_pos, track_error);
+    lcd_row(24, buf, YELLOW);
 
     /* L = ×óÂÖ PWM, V = ÍäµÀ½µËÙºóµÄÊµ¼ÊËÙ¶È */
-    sprintf(buf, "L%+5d V%3d     ", track_left_pwm, track_speed);
-    LCD_ShowString(0,  48, (const u8 *)buf, WHITE, BLACK, 16, 0);
+    sprintf(buf, "L%+4d V%3d", track_left_pwm, track_speed);   /* 10 ×Ö·û, ÁôÓàÁ¿ */
+    lcd_row(48, buf, WHITE);
 
-    sprintf(buf, "R%+5d          ", track_right_pwm);
-    LCD_ShowString(0,  64, (const u8 *)buf, WHITE, BLACK, 16, 0);
+    sprintf(buf, "R%+4d", track_right_pwm);
+    lcd_row(64, buf, WHITE);
 
     /* B = °´¼üÉè¶¨µÄ»ù´¡ËÙ¶È */
     if (!app_run)        sprintf(buf, "STOP  press S2");
     else if (track_lost) sprintf(buf, "LOST %-5d   ", track_lost);
     else                 sprintf(buf, "RUN   B%3d   ", Track_GetBaseSpeed());
-    LCD_ShowString(0,  88, (const u8 *)buf, app_run ? CYAN : RED, BLACK, 16, 0);
+    lcd_row(88, buf, app_run ? CYAN : RED);
 
+#if LCD_DIAG
+    {   /* Õï¶ÏÐÐ: I = I2C ´íÎóÊý | L = 5ms ÈÎÎñÕâ100msÄÚ×î»µ¼ä¸ô(ms, Õý³£ 5) | K = °´¼üÉ¨Ãè´ÎÊý/100ms(Õý³£¡Ö100)
+         * L ±ä´ó(¼¸Ê® ms) = Ö÷Ñ­»·±»Ä³¸öÈÎÎñ¿¨×¡ÁË (ÏÖÔÚ»ù±¾¾ÍÊÇ LCD Ë¢ÆÁÄÇÒ»ÏÂ)
+         * K Ã÷ÏÔÐ¡ÓÚ 100 = 1ms ¹³×ÓÃ»ÔÚÅÜ; K ±äºì¾ÍÊÇÕâ¸öÒâË¼ */
+        static uint16_t last_key = 0;
+        static uint16_t loop_max = 0;
+        uint16_t k;
+
+        if (app_loop_ms > loop_max) loop_max = app_loop_ms;
+        k        = (uint16_t)(key_scan_cnt - last_key);
+        last_key = key_scan_cnt;
+
+        sprintf(buf, "I%2d L%2d K%3d", track_i2c_err, loop_max, k);
+        lcd_row(112, buf, (k < 50) ? RED : GRAY);   /* K ±äºì = 1ms °´¼üÉ¨ÃèÃ»ÔÚÅÜ(²»Õý³£) */
+        loop_max = 0;
+    }
+#else
     sprintf(buf, "I2CERR %-4d   ", track_i2c_err);
-    LCD_ShowString(0, 112, (const u8 *)buf, track_i2c_err ? RED : GRAY, BLACK, 16, 0);
+    lcd_row(112, buf, track_i2c_err ? RED : GRAY);
+#endif
+
+    LCD_imu();                               /* µÚ7ÐÐ: IMU YAW + ÊÕ×Ö½ÚÊý */
 }
 
 /*---------------------------------------------------------------------------
@@ -360,6 +580,27 @@ static void LCD_track(void)
  *-------------------------------------------------------------------------*/
 void APP_Task_5ms(void)
 {
+    /* Õï¶Ï: ±¾ÈÎÎñµÄÊµ¼Êµ÷ÓÃ¼ä¸ô (= Ö÷Ñ­»·Ò»È¦µÄÊ±¼ä)¡£Õý³£ = 5ms */
+    {
+        static uint32_t last_ms = 0;
+        uint32_t now_ms = Get_Time();
+        app_loop_ms = (uint16_t)(now_ms - last_ms);
+        last_ms     = now_ms;
+    }
+
+    /* IMU ×ªÏò/±£ÏòÆÚ¼ä¶ÀÕ¼µç»ú: Ñ­¼£ÈÃ³ö, ÓÉ ImuTurn ÍÆ½ø */
+    if (ImuTurn_IsBusy())
+    {
+        ImuTurn_Update();
+
+        if (ImuTurn_JustFinished())          /* ¸Õ½áÊø: Ñ­¼£Çå×´Ì¬, ÏÂÒ»ÅÄ×ÔÈ»½Ó¹Ü */
+        {
+            Track_Reset();
+            imu_turn_done = 1;
+        }
+        return;
+    }
+
     if ((app_mode == APP_MODE_TRACK) && app_run)
     {
         Track_Run();
@@ -371,7 +612,15 @@ void APP_Task_5ms(void)
  *-------------------------------------------------------------------------*/
 void APP_Task_10ms(void)
 {
-    int ev = Key_Scan();
+    int ev;
+
+    if (key_ev_pending == 0) return;
+
+    /* È¡×ßÖÐ¶ÏÀï»º´æµÄÊÂ¼þ (¶ÌÔÝ¹ØÖÐ¶Ï, ÃâµÃÈ¡+ÇåÖ®¼äÓÖÀ´ÁËÐÂÊÂ¼þ±»¶ªµô) */
+    NVIC_DisableIRQ(TIMER_0_INST_INT_IRQN);
+    ev = key_ev_pending;
+    key_ev_pending = 0;
+    NVIC_EnableIRQ(TIMER_0_INST_INT_IRQN);
 
     if (ev == 0) return;
 
@@ -388,6 +637,7 @@ void APP_Task_10ms(void)
         }
         else
         {
+            ImuTurn_Stop();                                  /* ¼±Í£: ×ªÏò/±£ÏòÒ»ÆðÍ£ */
             Motor_Stop();                                    /* Êä³öÇåÁã + ·½Ïò½Å¸´Î» */
             PWMA = PWMB = PWMC = PWMD = 0;                    /* ÆÁÉÏÍ¬²½¹éÁã */
         }
@@ -415,6 +665,7 @@ void APP_Task_10ms(void)
  *-------------------------------------------------------------------------*/
 void APP_Task_20ms(void)
 {
+    IMU_Process();                           /* IMU: Ïû·Ñ»·ÐÎ»º³å, ½âÎö 0x7E 0x23 Ö¡ */
     Encoder_Update();                        /* »»³ö 4 Â· 20ms ¼ÆÊýÖµ */
 
     A_speed = Motor_Get_Encoder_A();
@@ -425,6 +676,11 @@ void APP_Task_20ms(void)
     if (!app_run)
     {
         return;                              /* Í£Ö¹×´Ì¬: Ö»²ÉÑù±àÂëÆ÷, ²»Ð´ PWM */
+    }
+
+    if (ImuTurn_IsBusy())
+    {
+        return;                              /* IMU ×ªÏò/±£ÏòÖÐ: µç»ú¹éËü, ÕâÀï²»Ð´ PWM */
     }
 
     if (app_mode != APP_MODE_MOTOR_TEST)
@@ -450,6 +706,10 @@ void APP_Task_20ms(void)
  *-------------------------------------------------------------------------*/
 void APP_Task_100ms(void)
 {
+#if IMU_TURN_DEMO
+    App_ImuTurnDemo();                       /* ÑÝÊ¾: Ðè°Ñ IMU_TURN_DEMO ¸Ä³É 1 */
+#endif
+
     if (app_mode == APP_MODE_TRACK)
     {
         LCD_track();
@@ -511,10 +771,11 @@ static void System_Init(void)
 
     Encoder_Init();                         /* ´ò¿ª 8 ¸ö±àÂëÆ÷½ÅµÄÖÐ¶Ï */
     Key_Init();                             /* °åÔØ°´¼ü S1/S2 µ÷ËÙ */
+    IMU_Init();                             /* IMU: UART1(PA8/PA9) RX ÖÐ¶Ï + RX ÉÏÀ­ */
+    ImuTurn_Init();                         /* IMU ×ªÏò/±£Ïò²ã¸´Î» */
 
-    NVIC_ClearPendingIRQ(TIMER_0_INST_INT_IRQN);
-    NVIC_EnableIRQ(TIMER_0_INST_INT_IRQN);  /* 1ms Ê±»ù -> µ÷¶ÈÆ÷ */
-    DL_TimerG_startCounter(TIMER_0_INST);
+    Timer_Init();                           /* 1ms Ê±»ù: Çå±êÖ¾ + ¿ªÖÐ¶Ï */
+    DL_TimerG_startCounter(TIMER_0_INST);   /* Æô¶¯ 1ms ¼ÆÊý -> µ÷¶ÈÆ÷Ê±»ù */
 
     LCD_Init();
     /* ÉÏµç×Ô¼ì: Ë¢ 3 ¸ö´¿É« + ÇåÆÁ, È·ÈÏ LCD ÔÚÎ» */
