@@ -191,13 +191,20 @@
  *     ImuTurn_JustFinished()  本拍刚结束 (读后清零); ImuTurn_GetDoneReason() 看原因
  *     ImuTurn_Stop()          急停/放弃;  ImuTurn_GetYaw/GetDiff/GetTarget()  调试
  *     ImuTurn_SetDoneCallback(cb)         完成回调, 在里面做下一步动作
- *   结束原因: ARRIVED(到位) / STOPPED(被停) / IMU_OFF(掉线自动停) / TIMEOUT(超时自动停)
+ *     ImuTurn_GetLastErr()    上次落点误差(度, 绝对值)  <- 验收就看它
+ *     ImuTurn_GetDecel()      当前标定出的减速能力 a (度/秒^2)
+ *     ImuTurn_GetCoast()      本拍预测的滑行角(度); ImuTurn_GetPulseCount() 上次用了几拍脉冲
+ *     ImuTurn_ResetCalib()    标定值退回种子值 (让它重新学)
+ *   结束原因: ARRIVED(到位) / STOPPED(被停) / IMU_OFF(掉线自动停) / TIMEOUT(超时自动停) / ERRWAY(方向反/被顶住)
  *   用法示例:
  *     if (ImuTurn_TurnDeg(+90, 0) == 0) { }          // 左转 90 度 (0 = 用 IMU_TURN_SPEED_MAX), 5ms 任务会自己推
  *     if (ImuTurn_JustFinished()) { 下一步; }         // 轮询完成 (或在回调里做)
  *     ImuTurn_HoldAbs(90.0f, 250);                   // 保持 90 度航向往前走
- *   调参: middle/ImuTurn.h 顶部 —— 转向只要调 IMU_TURN_LEAD_DEG (提前刹车角) 和 IMU_TURN_SPEED_MAX
- *   看现象: 屏第 7 行转向时变成 "Y 当前角 E 剩余角 W 角速度(度/秒)"; 平时是 "YAW xxx RXn"
+ *   调参: middle/ImuTurn.h 顶部 —— 转向主要调 IMU_TURN_SPEED_MAX (远段速度) /
+ *         IMU_TURN_CUT_MARGIN (老冲过头就 +1) / IMU_TURN_ARRIVE_DEG (想到位多准)。
+ *         ★ 减速能力 a 不用手调: 每次转完自动标定, 串口 TURN done 那行会打出来。
+ *   看现象: 屏第 7 行转向时是 "Y 当前角 E 剩余角 相位 角速度(度/秒)";
+ *         相位: D=远段定速 C=近段低速 B=断电等停稳 P=脉冲微调; 平时是 "YAW xxx RXn"
  *   演示: 把本文件顶部的 IMU_TURN_DEMO 改成 1 -> 单击 S2 后自动跑
  *         "原地左转 90 -> 保持该航向直行 2s -> 停车"
  *
@@ -315,10 +322,10 @@ void APP_SysTick_Hook(void)
  *       原地转 IMU_TURN_DEMO_DEG 度 (正=左/逆时针, 负=右/顺时针)
  *       -> 再反向转同样角度 (IMU_TURN_DEMO_BACK=1, 验证反方向 + 从非零角度起步)
  *       -> 原地锁住该角度 2s (speed=0, 车不动) -> 停车
- *       要测 180 度: 把下面 IMU_TURN_DEMO_DEG 改成 180 就行 (提前刹车角不用重调)
+ *       要测 180 度: 把下面 IMU_TURN_DEMO_DEG 改成 180 就行 (v7 门限是算出来的, 不用改参数)
  * 只用于台架验证 ImuTurn 的接口, 正式跑改回 0 (演示期间循迹不参与) */
 #define IMU_TURN_DEMO   1
-#define IMU_TURN_DEMO_DEG  90    /* 演示转多少度: 90 或 180 或 -90 或 -180 (提前刹车角通用) */
+#define IMU_TURN_DEMO_DEG  90    /* 演示转多少度: 90 或 180 或 -90 或 -180 (v7 自动适应)  */
 #define IMU_TURN_DEMO_BACK  1    /* 1 = 转完再【反向】转同样角度 (验证反方向 + 从非零角度起步) */
 
 #if IMU_TURN_DEMO
@@ -337,7 +344,10 @@ static void App_ImuTurnDemo(void)
     {
     case 0:                                    /* 起步: 原地左转 IMU_TURN_DEMO_DEG 度 */
         if (!ImuTurn_IsBusy() && (ImuTurn_TurnDeg(IMU_TURN_DEMO_DEG, 0) == 0))
+        {
+            printf("TURN1 start: yaw=%d a=%d\r\n", (int)ImuTurn_GetYaw(), (int)ImuTurn_GetDecel());
             step = 1;
+        }
         break;
 
     case 1:                                    /* 第一转到位 */
@@ -345,13 +355,17 @@ static void App_ImuTurnDemo(void)
         {
             imu_turn_done = 0;
             /* 台架数据: 结束原因(0=到位 3=超时 4=越走越远) / 目标 / 落点 / 落点误差 */
-            printf("TURN1 done: reason=%d target=%d yaw=%d err=%d\r\n",
+            printf("TURN1 done: reason=%d target=%d yaw=%d err=%d a=%d pulse=%d\r\n",
                    ImuTurn_GetDoneReason(), (int)ImuTurn_GetTarget(),
-                   (int)ImuTurn_GetYaw(), (int)ImuTurn_GetDiff());
+                   (int)ImuTurn_GetYaw(), (int)ImuTurn_GetDiff(),
+                   (int)ImuTurn_GetDecel(), ImuTurn_GetPulseCount());
 #if IMU_TURN_DEMO_BACK
             /* 再【反向】转同样角度: 这次起点是个非零角度, 用来验证"任意角度起步 + 反向" */
             if (!ImuTurn_IsBusy() && (ImuTurn_TurnDeg(-IMU_TURN_DEMO_DEG, 0) == 0))
+            {
+                printf("TURN2 start: yaw=%d a=%d\r\n", (int)ImuTurn_GetYaw(), (int)ImuTurn_GetDecel());
                 step = 2;
+            }
 #else
             t0 = Get_Time();
             ImuTurn_HoldAbs(ImuTurn_GetYaw(), 0);
@@ -365,9 +379,10 @@ static void App_ImuTurnDemo(void)
         if (imu_turn_done)
         {
             imu_turn_done = 0;
-            printf("TURN2 done: reason=%d target=%d yaw=%d err=%d\r\n",
+            printf("TURN2 done: reason=%d target=%d yaw=%d err=%d a=%d pulse=%d\r\n",
                    ImuTurn_GetDoneReason(), (int)ImuTurn_GetTarget(),
-                   (int)ImuTurn_GetYaw(), (int)ImuTurn_GetDiff());
+                   (int)ImuTurn_GetYaw(), (int)ImuTurn_GetDiff(),
+                   (int)ImuTurn_GetDecel(), ImuTurn_GetPulseCount());
             t0 = Get_Time();
             ImuTurn_HoldAbs(ImuTurn_GetYaw(), 0);   /* 0 = 原地锁角, 车轮不转 */
             step = 3;
@@ -479,7 +494,7 @@ static void LCD_imu(void)
         if (w >  99) w =  99;
         if (w < -99) w = -99;
         sprintf(buf, "Y%+4d E%+4d %c%3d", yaw, (int)ImuTurn_GetDiff(),
-                ImuTurn_GetPhase(), w);   /* 相位: D定速 C低速 R反向制动 B断电保持 F补足 */
+                ImuTurn_GetPhase(), w);   /* 相位: D远段定速 C近段低速 B断电等停稳 P脉冲微调 */
         lcd_row(136, buf, YELLOW);
     }
     else                                     /* 平时: 显示 RX, 用来看 IMU 通没通 */
