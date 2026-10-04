@@ -74,19 +74,32 @@ def norm180(d):
     return d
 
 
+def norm180_turn(d, sgn):
+    """±180 是 norm180 的边界 (它返回 -180): 边界值的符号统一到命令方向。
+    对应 C 里的 _norm180_turn(); 不这么干, 180 度转向一上来就会误判"冲过目标"。"""
+    d = norm180(d)
+    if d == -180.0 and sgn > 0:
+        d = 180.0
+    if d == 180.0 and sgn < 0:
+        d = -180.0
+    return d
+
+
 class Car:
     """车辆 + IMU 的物理模型"""
 
-    def __init__(self, a_plant=A_PLANT_DEF, tau_ms=TAU_MS, w_min=W_MIN):
+    def __init__(self, a_plant=A_PLANT_DEF, tau_ms=TAU_MS, w_min=W_MIN, yaw0=0.0):
         self.a = a_plant
         self.tau = tau_ms
         self.w_min = w_min
-        self.yaw = 0.0          # 真实偏航角 (度, 不量化)
+        self.yaw = yaw0         # 真实偏航角 (度, 不量化) —— ★ 必须能非零起步:
+                                #   台架上 TURN2 就是从 TURN1 的落点起转的, 而且 ±180 度
+                                #   从非零角度起会踩 norm180 的边界 (见 sim() 里 init_dir 的注释)
         self.w = 0.0            # 真实偏航角速度 (度/秒)
         self.t = 0.0            # 秒
         self.pwm = 0            # 当前 PWM (-999..999)
         self.brake = False      # True = 切断驱动 + 短路制动
-        self.imu_yaw = 0.0      # IMU 报出来的 yaw (25Hz, 0.1 度量化)
+        self.imu_yaw = round(yaw0, 1)   # IMU 报出来的 yaw (25Hz, 0.1 度量化)
         self._next_imu = IMU_DT_MS / 1000.0
         self.imu_updated = False
 
@@ -110,17 +123,27 @@ class Car:
 
 
 def sim(delta_deg, seed_a=A_PLANT_DEF, a_plant=A_PLANT_DEF, trust=DECEL_TRUST,
-        tau_ms=TAU_MS, w_min=W_MIN, trace=False, t_max=16.0):
-    """跑一次原地转。返回 (落点误差, 事件列表, 末态字典)"""
-    car = Car(a_plant, tau_ms, w_min)
-    target = norm180(float(delta_deg))
-    init_dir = 1 if delta_deg >= 0 else -1
+        tau_ms=TAU_MS, w_min=W_MIN, trace=False, t_max=16.0, yaw0=0.0):
+    """跑一次原地转 (从 yaw0 起转 delta_deg)。
+    返回 (带符号误差, 事件列表, 末态字典); 误差 > 0 = 冲过目标, < 0 = 差一点。
+
+    ★ init_dir 必须取【实际要往哪边转】(diff 的符号), 不能取 delta 的正负:
+      命令 +180 且从非零角度起步时, target=norm180(cur+180) 会让 diff 正好落在
+      norm180 的边界 -180 —— 几何上"往负转 180 度"是对的, 但若拿 delta 的正负当基准,
+      "冲过目标"判据会立刻为真 -> 250ms 后全速切断 -> 滑 180 度。
+      台架上的 TURN2/±180 都是非零角度起步, 所以这条一定要对。
+      对应 ImuTurn.c: TurnDeg() 里 init_dir 由初始 diff 的符号决定。"""
+    car = Car(a_plant, tau_ms, w_min, yaw0)
+    target = norm180(yaw0 + float(delta_deg))
+    turn_sign = 1 if delta_deg >= 0 else -1
+    init_dir = 1 if norm180_turn(target - norm180(car.imu_yaw), turn_sign) >= 0.0 else -1
 
     # ---- 控制器状态 (对应 ImuTurn.c 的 static 变量) ----
     decel = seed_a
     gain = GAIN_DEF
     phase = 'FAR'                 # FAR / NEAR / COAST / PULSE
-    last_yaw_sample = 0.0
+    last_yaw_sample = norm180(yaw0)   # ★ = |Car.imu_yaw| (对应 C 里 last_yaw_sample = cur_yaw),
+                                      #   给 0 的话第一帧 dv 会是个大野值
     v_app = 0.0                   # 低通后的带符号角速度
     last_frame_ms = 0.0
     arrive_cnt = errway_cnt = 0
@@ -129,7 +152,7 @@ def sim(delta_deg, seed_a=A_PLANT_DEF, a_plant=A_PLANT_DEF, trust=DECEL_TRUST,
     cal_pending = False
     pulse_cnt = 0
     pulse_start = pulse_ms = 0.0
-    pulse_dir = 1
+    pulse_dir = 1                 # ★ 脉冲方向在开始时锁死 (对应 C 的 pulse_dir), 中途不翻
     pulse_yaw0 = 0.0
     pulse_cal = False
     last_err = 0.0
@@ -140,7 +163,7 @@ def sim(delta_deg, seed_a=A_PLANT_DEF, a_plant=A_PLANT_DEF, trust=DECEL_TRUST,
         car.step()
         now = car.t * 1000.0
         cur = norm180(car.imu_yaw)
-        diff = norm180(target - cur)
+        diff = norm180_turn(target - cur, turn_sign)
         ad = abs(diff)
         direction = 1 if diff >= 0.0 else -1
 
@@ -149,7 +172,10 @@ def sim(delta_deg, seed_a=A_PLANT_DEF, a_plant=A_PLANT_DEF, trust=DECEL_TRUST,
             break
 
         # ---- 角速度: 只在"新数据帧"到来时更新 (与 C 一致) ----
-        if car.imu_yaw != last_yaw_sample:
+        # ★ 判据两边都必须是【归一化后】的 yaw: C 里是 cur_yaw != last_yaw_sample (都过了 _norm180)。
+        #   拿原始 yaw 去比归一化值, 一旦原始值越过 +-180 (181 vs -179) 就永远不等 ->
+        #   每 5ms 都当成"新帧", dt 被夹到 5ms -> 速率在 900 度/秒的尖峰上乱跳 -> 标定被污染。
+        if cur != last_yaw_sample:
             dt = max(5.0, min(200.0, now - last_frame_ms))
             # 当前帧之前 last_frame_ms = 0 的第一次, dt 会很大 -> 被 min(200) 夹住
             v = norm180(cur - last_yaw_sample) * 1000.0 / dt
@@ -177,7 +203,7 @@ def sim(delta_deg, seed_a=A_PLANT_DEF, a_plant=A_PLANT_DEF, trust=DECEL_TRUST,
         if phase in ('COAST', 'PULSE'):
             if phase == 'PULSE':
                 if (now - pulse_start) < pulse_ms and not crossed and ad > 1.5:
-                    car.pwm = MIN_PWM * direction     # SetPWM 会覆盖短路制动
+                    car.pwm = MIN_PWM * pulse_dir     # SetPWM 会覆盖短路制动; 方向用锁存值
                     car.brake = False
                 else:
                     car.pwm = 0
@@ -213,12 +239,14 @@ def sim(delta_deg, seed_a=A_PLANT_DEF, a_plant=A_PLANT_DEF, trust=DECEL_TRUST,
                     if err <= ARRIVE or crossed or pulse_cnt >= PULSE_MAX:
                         reason = ("到位" if err <= ARRIVE else
                                   ("过冲(不回转)" if crossed else "脉冲用尽"))
-                        return car.yaw - delta_deg, ev, dict(
-                            err=err, a=decel, gain=gain, pulses=pulse_cnt,
-                            t=car.t, reason=reason)
+                        return norm180(car.yaw - target), ev, dict(
+                            err=err, sin_err=norm180(car.yaw - target), a=decel, gain=gain,
+                            pulses=pulse_cnt, t=car.t, reason=reason, yaw0=yaw0, target=target,
+                            landed=norm180(car.imu_yaw), init_dir=init_dir)
                     t = min(PULSE_MAX_MS, max(PULSE_MIN_MS, (PULSE_FRAC * err) / gain))
                     pulse_ms = t
                     pulse_cnt += 1
+                    pulse_dir = direction   # 锁存本拍方向
                     pulse_start = now
                     pulse_yaw0 = cur
                     phase = 'PULSE'
@@ -269,19 +297,22 @@ def sim(delta_deg, seed_a=A_PLANT_DEF, a_plant=A_PLANT_DEF, trust=DECEL_TRUST,
         car.brake = False
         arrive_cnt = 0
 
-    return car.yaw - delta_deg, ev, dict(err=abs(norm180(target - norm180(car.imu_yaw))),
-                                         a=decel, gain=gain, pulses=pulse_cnt,
-                                         t=car.t, reason=reason)
+    return norm180(car.yaw - target), ev, dict(
+        err=abs(norm180(target - norm180(car.imu_yaw))), sin_err=norm180(car.yaw - target),
+        a=decel, gain=gain, pulses=pulse_cnt, t=car.t, reason=reason,
+        yaw0=yaw0, target=target, landed=norm180(car.imu_yaw), init_dir=init_dir)
 
 
 def one(args):
     e, ev, st = sim(args.deg, seed_a=args.seed_a, a_plant=args.plant_a, trust=args.trust,
-                    tau_ms=args.tau, w_min=args.w_min, trace=args.trace)
+                    tau_ms=args.tau, w_min=args.w_min, trace=args.trace, yaw0=args.yaw0)
     print("=" * 74)
-    print("命令 %+d°   真车 a=%.0f°/s²   种子 a=%.0f   DECEL_TRUST=%.2f"
-          % (args.deg, args.plant_a, args.seed_a, args.trust))
-    print("落点 %+.1f°   误差 %.2f°   脉冲 %d 拍   用时 %.2fs   学到 a=%.0f   [%s]"
-          % (e + args.deg, abs(e), st['pulses'], st['t'], st['a'], st['reason']))
+    print("起点 %+.1f°   命令 %+d°   目标 %+.1f°   真车 a=%.0f°/s²   种子 a=%.0f   TRUST=%.2f"
+          % (args.yaw0, args.deg, st['target'], args.plant_a, args.seed_a, args.trust))
+    et = e * st['init_dir']    # 按【行进方向】看的误差: >0 = 越过目标, <0 = 差一点
+    print("落点 %+.1f°   误差 %+.2f° (行进方向: %s)   脉冲 %d 拍   用时 %.2fs   学到 a=%.0f   [%s]"
+          % (st['landed'], e, "越过目标" if et > 0 else "差一点",
+             st['pulses'], st['t'], st['a'], st['reason']))
     if ev:
         print("-" * 74)
         print("t(s)   事件          细节")
@@ -293,18 +324,22 @@ def sequence(args):
     """同一台车连转多次: 看自标定能不能收敛 (种子 = 上一次学到的 a)"""
     seq = [90, -90, 180, -180, 90, 180]
     print("=" * 74)
-    print("同一台车连转 %d 次   真车 a=%.0f   DECEL_TRUST=%.2f" % (len(seq), args.plant_a, args.trust))
+    print("同一台车连转 %d 次 (起点=上一转落点)   真车 a=%.0f   DECEL_TRUST=%.2f"
+          % (len(seq), args.plant_a, args.trust))
     print("=" * 74)
     seed = args.seed_a
+    yaw = args.yaw0        # ★ 连转时起点 = 上一转的落点 (台架就是这样)
     errs = []
     for k, d in enumerate(seq, 1):
+        a_before = seed                     # 这一转开始前学到的 a
         e, ev, st = sim(d, seed_a=seed, a_plant=args.plant_a, trust=args.trust,
-                        tau_ms=args.tau, w_min=args.w_min)
-        seed = st['a']
+                        tau_ms=args.tau, w_min=args.w_min, yaw0=yaw)
+        seed, yaw = st['a'], st['landed']
         errs.append(abs(e))
-        print("  第%d转 %+5d° -> 落点 %+7.1f°  误差 %5.2f°  脉冲 %d 拍  %5.2fs  "
-              "a: %.0f -> %.0f   [%s]"
-              % (k, d, e + d, abs(e), st['pulses'], st['t'], st['a'], st['a'], st['reason']))
+        print("  第%d转 %+5d° 起 %+7.1f° -> 目标 %+7.1f° 落点 %+7.1f°  误差 %5.2f°  "
+              "脉冲 %d 拍  %5.2fs  a: %.0f -> %.0f   [%s]"
+              % (k, d, st['yaw0'], st['target'], st['landed'], abs(e),
+                 st['pulses'], st['t'], a_before, st['a'], st['reason']))
     print("-" * 74)
     print("  最差 %.2f°   平均 %.2f°" % (max(errs), sum(errs) / len(errs)))
 
@@ -336,6 +371,7 @@ def main():
     ap.add_argument("--trust", type=float, default=DECEL_TRUST, help="IMU_TURN_DECEL_TRUST")
     ap.add_argument("--tau", type=float, default=TAU_MS, help="轮速时间常数 (ms)")
     ap.add_argument("--w-min", type=float, default=W_MIN, help="120PWM 的稳态角速度 (度/秒)")
+    ap.add_argument("--yaw0", type=float, default=0.0, help="起始 yaw (度), 台架上 TURN2 是非零起步")
     ap.add_argument("--trace", action="store_true", help="打印事件时间线")
     ap.add_argument("--seq", action="store_true", help="连转 6 次 (默认模式)")
     ap.add_argument("--sweep", action="store_true", help="扫描地面/电量变化")

@@ -35,6 +35,7 @@ static uint32_t last_frame_ms   = 0;      /* 上一帧数据的时刻 (用真实帧间隔, 25H
 
 /* ---- 方向 / 段 ---- */
 static int8_t   init_dir        = 1;      /* 启动时 diff 的方向: 用来判断"是否冲过了目标" */
+static int8_t   turn_sign       = 1;      /* 本次命令的符号 (+1/-1): 只用来解 ±180 的边界歧义 */
 static int      spot_phase      = SP_FAR;
 static char     spot_st         = 'D';    /* 本拍相位: D=远段定速 C=近段低速 B=断电等停稳 P=脉冲微调 */
 static int      errway_cnt      = 0;      /* 驱动段连续"远离目标"的拍数 (判方向反了) */
@@ -70,6 +71,22 @@ static float _norm180(float d)
 }
 
 static float _fabs(float v) { return (v >= 0.0f) ? v : -v; }
+
+/* ±180 度是 _norm180 的边界 (它按约定返回 -180)。
+ * ★ 必须把边界值的符号统一到"命令方向"上, 否则会自相矛盾:
+ *   命令 +180 且从非零角度起步时 target = _norm180(cur+180) 会让 diff = -180
+ *   (几何上"往负转 180 度"没错), 但 init_dir 取 delta 的符号 = +1 ->
+ *   "冲过目标"判据 ((diff<0)&&(init_dir>0)) 第一拍就为真 -> 250ms 后全速切断 ->
+ *   滑 180 度 (台架 TURN2 / ±180 都是非零角度起步, 必现)。
+ * 规则: diff 落在边界时, 用命令方向的符号 (turn_sign)。
+ * 注: 只有 |delta| 恰好 180 时才会踩到, 其它角度 diff 本来就 = delta。 */
+static float _norm180_turn(float d, int8_t sgn)
+{
+    d = _norm180(d);
+    if ((d == -180.0f) && (sgn > 0)) d =  180.0f;
+    if ((d ==  180.0f) && (sgn < 0)) d = -180.0f;
+    return d;
+}
 
 /* IMU 在线判据: "收到的字节数"还在涨 = 在线 (同时刷新时间戳) */
 static int _imu_alive(void)
@@ -167,7 +184,10 @@ int ImuTurn_TurnDeg(int delta_deg, int speed)
     pulse_cal       = 0;
     coast_pred      = 0.0f;
     last_frame_ms   = Get_Time();
-    init_dir        = (delta_deg >= 0) ? 1 : -1;   /* 记住出发方向, 用来判断是否冲过目标 */
+    turn_sign       = (delta_deg >= 0) ? 1 : -1;   /* 本次命令方向 (只用于解 ±180 边界) */
+    /* init_dir 要按【几何上实际往哪边转】定, 不能只按 delta 的正负:
+     * 二者只在 |delta| 恰为 180 时不一致, 而那正是会全速切断的坑 (见 _norm180_turn) */
+    init_dir        = (_norm180_turn(target_yaw - cur_yaw, turn_sign) >= 0.0f) ? 1 : -1;
     start_ms        = Get_Time();
     last_rx_bytes   = IMU_GetRxByteCount();
     last_rx_ms      = start_ms;
@@ -229,7 +249,9 @@ void ImuTurn_Update(void)
     }
 
     cur_yaw  = _norm180(euler[2] * (float)IMU_TURN_YAW_SIGN);   /* 归一化: 从任意角度起都不会出现 -350 这种值 */
-    diff_deg = _norm180(target_yaw - cur_yaw);          /* >0 = 还要往正方向(左)转 */
+    /* >0 = 还要往正方向(左)转。±180 时用 _norm180_turn 统一符号, 否则 180 度转向会误判"冲过目标" */
+    diff_deg = (turn_mode == IMU_TURN_SPOT) ? _norm180_turn(target_yaw - cur_yaw, turn_sign)
+                                            : _norm180(target_yaw - cur_yaw);
 
     /* ---- 角速度: 只在"新数据帧"到来时更新 (25Hz -> 40ms 一帧)
      * yaw 值没变 = 还是上一帧的数据 -> 什么都不做, 否则会变成按 5ms 打脉冲。
