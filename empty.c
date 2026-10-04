@@ -325,7 +325,7 @@ void APP_SysTick_Hook(void)
  *       要测 180 度: 把下面 IMU_TURN_DEMO_DEG 改成 180 就行 (v7 门限是算出来的, 不用改参数)
  * 只用于台架验证 ImuTurn 的接口, 正式跑改回 0 (演示期间循迹不参与) */
 #define IMU_TURN_DEMO   1
-#define IMU_TURN_DEMO_DEG  90    /* 演示转多少度: 90 或 180 或 -90 或 -180 (v7 自动适应)  */
+#define IMU_TURN_DEMO_DEG  180    /* 演示转多少度: 90 或 180 或 -90 或 -180 (v7 自动适应)  */
 #define IMU_TURN_DEMO_BACK  1    /* 1 = 转完再【反向】转同样角度 (验证反方向 + 从非零角度起步) */
 
 #if IMU_TURN_DEMO
