@@ -83,6 +83,16 @@ int     track_lost      = 0;
 uint8_t track_bits      = 0xFF;
 int     track_i2c_err   = 0;
 
+/* ---- 路口 / 房间检测的对外状态 (见 XunJi.h) ---- */
+int     track_nblack    = 0;
+int     track_cross     = 0;
+int     track_cross_side= 0;
+int     track_room      = 0;
+int     track_cross_cnt = 0;
+/* 检测内部: 去抖计数 / 本帧已报标志 / 待取边沿事件 (只在 Track_Run 里更新) */
+static uint8_t det_cross_cnt = 0, det_cross_rep = 0, det_cross_ev = 0;
+static uint8_t det_room_cnt  = 0, det_room_rep  = 0, det_room_ev  = 0;
+
 static int base_speed = TRACK_SPEED_DEFAULT;    /* 直行基础速度(开环 PWM), 在线可调 */
 int track_base_speed  = TRACK_SPEED_DEFAULT;    /* 对外只读副本 */
 
@@ -175,6 +185,11 @@ void Track_Run(void)
         last_error = 0;
         d_filt     = 0;
         last_time  = Get_Time();
+        det_cross_cnt = det_cross_rep = det_cross_ev = 0;
+        det_room_cnt  = det_room_rep  = det_room_ev  = 0;
+        track_cross = track_room = 0;
+        track_nblack = 0;
+        track_cross_cnt = 0;
     }
 
     /* ------ 1. 读 8 路模拟量 (0x09, 除8 数据 0~255) ------ */
@@ -207,6 +222,50 @@ void Track_Run(void)
     }
     track_bits = bits;
     now = Get_Time();
+
+    /* ------ 2b. 路口 / 房间检测 (连续帧去抖 + 边沿缓存) ------
+     * 只在这里算; 后面丢线分支会 return, 但丢线时 bits 全 1 -> 不会误报, 所以放这里安全 */
+    {
+        int nb = 0, i2;
+        int left_black, right_black;
+
+        for (i2 = 0; i2 < 8; i2++) if (!((bits >> i2) & 0x01)) nb++;
+        track_nblack = nb;
+
+        left_black  = !((bits >> 0) & 0x01);     /* bit0 = 最左 */
+        right_black = !((bits >> 7) & 0x01);     /* bit7 = 最右 */
+
+        /* 路口: 最左 或 最右 压线 */
+        if (left_black || right_black)
+        {
+            if (det_cross_cnt < 250) det_cross_cnt++;
+            if ((det_cross_cnt >= CROSS_CONFIRM_FRAMES) && !det_cross_rep)
+            {
+                det_cross_rep = 1;
+                det_cross_ev  = 1;               /* 边沿事件, 等 Track_TakeCross() 取走 */
+                track_cross_cnt++;
+            }
+        }
+        else { det_cross_cnt = 0; det_cross_rep = 0; }
+
+        track_cross      = (det_cross_cnt >= CROSS_CONFIRM_FRAMES) ? 1 : 0;
+        track_cross_side = (left_black && right_black) ? 0
+                         : (left_black ? -1 : (right_black ? 1 : 0));
+
+        /* 房间/工作区: 大面积压线 */
+        if (nb >= ROOM_MIN_BLACK)
+        {
+            if (det_room_cnt < 250) det_room_cnt++;
+            if ((det_room_cnt >= CROSS_CONFIRM_FRAMES) && !det_room_rep)
+            {
+                det_room_rep = 1;
+                det_room_ev  = 1;
+            }
+        }
+        else { det_room_cnt = 0; det_room_rep = 0; }
+
+        track_room = (det_room_cnt >= CROSS_CONFIRM_FRAMES) ? 1 : 0;
+    }
 
     /* ------ 3. 丢线 (全部低于阈值) ------ */
     if (den == 0)
@@ -318,6 +377,38 @@ void Track_Run(void)
     track_output(left, right);
 
     last_error = error;
+}
+
+/*---------------------------------------------------------------------------
+ * 路口/房间事件的"边沿式"读取 (状态机用: 读一次就清)
+ *-------------------------------------------------------------------------*/
+int Track_TakeCross(void)
+{
+    int r = (int)det_cross_ev;
+    det_cross_ev = 0;
+    return r;
+}
+
+int Track_TakeRoom(void)
+{
+    int r = (int)det_room_ev;
+    det_room_ev = 0;
+    return r;
+}
+
+/*---------------------------------------------------------------------------
+ * 停车 (任务状态机的"步间停车"用): 左右 PWM 给 0 + 短路制动
+ *   注意: 循迹任务还在 5ms 跑的话下一拍会把 PWM 又写回去 —— 所以状态机在停车
+ *         阶段不要再调 Track_Run(), 直接调本函数。
+ *-------------------------------------------------------------------------*/
+void Track_Stop(void)
+{
+    track_speed     = 0;
+    track_left_pwm  = 0;
+    track_right_pwm = 0;
+    Motor_SetLeftPWM(0);
+    Motor_SetRightPWM(0);
+    Motor_Brake();                 /* 短路制动: 停得住, 不滑 */
 }
 
 /*---------------------------------------------------------------------------

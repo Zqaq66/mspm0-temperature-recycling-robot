@@ -271,6 +271,13 @@
 #include "Key.h"            /* 板载按键: 速度在线可调 */
 #include "imu_uart_driver.h"/* IMU: YbIMU UART 驱动 (UART1 PA8=TX/PA9=RX) */
 #include "ImuTurn.h"        /* IMU 转向/保向: 转到指定角度 / 保持指定角度 */
+#include "Mission.h"        /* 任务状态机: 循迹->路口->转向->工作->恢复循迹 (路线表在 Mission.c) */
+#include "TimeSync.h"        /* I2C 授时查询端: ESP32-S2(0x42) -> 本地走时 (接线/调参见 TimeSync.h) */
+
+/* ---- 任务状态机总开关 ----
+ * 1 = 单击 S2 后按 Mission.c 的路线表跑 (循迹+路口检测+定角转弯+步间停车 + 工作钩子)
+ * 0 = 退回"纯循迹" (原来的行为, 台架调循迹/转弯参数时用) */
+#define MISSION_ENABLE   1
 
 #define TARGET_SPEED   40       /* 闭环目标: 编码器计数 / 20ms (先给小的, 按实测调) */
 
@@ -324,7 +331,9 @@ void APP_SysTick_Hook(void)
  *       -> 原地锁住该角度 2s (speed=0, 车不动) -> 停车
  *       要测 180 度: 把下面 IMU_TURN_DEMO_DEG 改成 180 就行 (v7 门限是算出来的, 不用改参数)
  * 只用于台架验证 ImuTurn 的接口, 正式跑改回 0 (演示期间循迹不参与) */
-#define IMU_TURN_DEMO   1
+#define IMU_TURN_DEMO   0        /* ★ 开了任务状态机(MISSION_ENABLE=1)就必须关掉它:
+                                  * 演示和状态机会同时调 ImuTurn, 互相抢电机。
+                                  * 要单独台架测转弯: 这里改 1, 同时把 MISSION_ENABLE 改 0 */
 #define IMU_TURN_DEMO_DEG  180    /* 演示转多少度: 90 或 180 或 -90 或 -180 (v7 自动适应)  */
 #define IMU_TURN_DEMO_BACK  1    /* 1 = 转完再【反向】转同样角度 (验证反方向 + 从非零角度起步) */
 
@@ -506,6 +515,36 @@ static void LCD_imu(void)
 }
 
 /*---------------------------------------------------------------------------
+ * 第8行(y=144): 授时时间 —— 只在"时间可用"时显示, 未同步就整行清空
+ *   屏 128x160, 16 号字一行 16 字符; y=144 是最后一行(到 160), 原来没被占用。
+ *   显示 "10-05 20:31:07" (14 字符): 含秒, 但秒是本板自己走出来的, 不用每秒读总线。
+ *   st ==  1: 绿字 ; st == 0: 空白(模块还没联上网, 正常, 不报警) ; st == -1: 红字(接线问题)
+ *-------------------------------------------------------------------------*/
+static int ts_last_status = 99;     /* 授时状态上报用: 1000ms 任务里看它变没变 */
+
+static void LCD_clock(void)
+{
+    char buf[24];
+    int  st = TimeSync_Status();
+
+    if (st == 1)
+    {
+        sprintf(buf, "%s", TimeSync_GetClock());
+        lcd_row(144, buf, GREEN);
+    }
+    else if (st == 0)
+    {
+        buf[0] = 0;                                  /* 按要求: 未同步不显示 */
+        lcd_row(144, buf, GRAY);
+    }
+    else
+    {
+        sprintf(buf, "TIME I2C ERR   ");             /* 总线故障: 查线/上拉/供电 */
+        lcd_row(144, buf, RED);
+    }
+}
+
+/*---------------------------------------------------------------------------
  * LCD 状态显示 (只刷文字, 不做整屏刷新, 免得拖慢 20ms 环)
  *-------------------------------------------------------------------------*/
 static void LCD_status(void)
@@ -534,6 +573,8 @@ static void LCD_status(void)
     lcd_row(104, buf, CYAN);
 
     LCD_imu();                               /* 第7行: IMU YAW + 收字节数 */
+
+    LCD_clock();                             /* 第8行: 授时时间 (未同步不显示) */
 }
 
 /*---------------------------------------------------------------------------
@@ -563,6 +604,10 @@ static void LCD_track(void)
     /* B = 按键设定的基础速度 */
     if (!app_run)        sprintf(buf, "STOP  press S2");
     else if (track_lost) sprintf(buf, "LOST %-5d   ", track_lost);
+#if MISSION_ENABLE
+    else if (Mission_IsActive())
+                         sprintf(buf, "%sB%3d", Mission_GetStatus(), Track_GetBaseSpeed());
+#endif
     else                 sprintf(buf, "RUN   B%3d   ", Track_GetBaseSpeed());
     lcd_row(88, buf, app_run ? CYAN : RED);
 
@@ -578,7 +623,8 @@ static void LCD_track(void)
         k        = (uint16_t)(key_scan_cnt - last_key);
         last_key = key_scan_cnt;
 
-        sprintf(buf, "I%2d L%2d K%3d", track_i2c_err, loop_max, k);
+        /* X = 路口电平(最左/最右压线), H = 房间黑块电平(大面积压线) */
+        sprintf(buf, "X%d H%d L%2d K%3d", track_cross, track_room, loop_max, k);
         lcd_row(112, buf, (k < 50) ? RED : GRAY);   /* K 变红 = 1ms 按键扫描没在跑(不正常) */
         loop_max = 0;
     }
@@ -588,6 +634,8 @@ static void LCD_track(void)
 #endif
 
     LCD_imu();                               /* 第7行: IMU YAW + 收字节数 */
+
+    LCD_clock();                             /* 第8行: 授时时间 (未同步不显示) */
 }
 
 /*---------------------------------------------------------------------------
@@ -615,6 +663,15 @@ void APP_Task_5ms(void)
         }
         return;
     }
+
+#if MISSION_ENABLE
+    /* 任务状态机接管: 由它决定这一拍是 循迹 / 盲走 / 定向转 / 停车 */
+    if (Mission_IsActive())
+    {
+        Mission_Run();
+        return;
+    }
+#endif
 
     if ((app_mode == APP_MODE_TRACK) && app_run)
     {
@@ -648,10 +705,15 @@ void APP_Task_10ms(void)
         {
             if (app_mode == APP_MODE_TRACK) Track_Reset();  /* 清 PID / 丢线计时 */
             Motor_Enable();                                  /* STBY 使能 */
-
+#if MISSION_ENABLE
+            if (app_mode == APP_MODE_TRACK) Mission_Start(); /* 按路线表开跑 */
+#endif
         }
         else
         {
+#if MISSION_ENABLE
+            Mission_Stop();                                  /* 状态机一起停 (含急停转向) */
+#endif
             ImuTurn_Stop();                                  /* 急停: 转向/保向一起停 */
             Motor_Stop();                                    /* 输出清零 + 方向脚复位 */
             PWMA = PWMB = PWMC = PWMD = 0;                    /* 屏上同步归零 */
@@ -765,6 +827,32 @@ void APP_Task_100ms(void)
  *-------------------------------------------------------------------------*/
 void APP_Task_1000ms(void)
 {
+    /* 授时模块: 1s 叫一次, 内部按 TIMESYNC_CALIB_MS(已同步=30s) / TIMESYNC_RETRY_MS(未同步=3s)
+     * 自己判断这次要不要真读总线 —— 平时空跑不占时间。两次读数之间靠本板晶振走时, 秒不会停。
+     * 放这个任务而不是 5ms 控制回路: 读事务是阻塞的 (正常 ~0.6ms, 断线时最坏 50ms 超时)。
+     * 从机只在被读时应答、不主动上报, 所以必须自己轮询。 */
+    {
+        int st;
+
+        TimeSync_Poll();
+
+        st = TimeSync_Status();
+        if (st != ts_last_status)      /* 只在状态变化时打串口 (9600 下发一行要几十 ms) */
+        {
+            ts_last_status = st;
+
+            if (st == 1)
+                printf("TIME ok: %s  (utc=%u ok=%u)\r\n", TimeSync_GetStr(),
+                       (unsigned int)TimeSync_GetEpochUtc(), (unsigned int)TimeSync_GetOkCount());
+            else if (st == 0)
+                printf("TIME wait: module not synced yet (bus ok, ok=%u err=%u)\r\n",
+                       (unsigned int)TimeSync_GetOkCount(), (unsigned int)TimeSync_GetErrCount());
+            else
+                printf("TIME FAULT: no ACK on I2C1 PA29/PA30 -> check wire/pullup/power (err=%u)\r\n",
+                       (unsigned int)TimeSync_GetErrCount());
+        }
+    }
+
 //    if (stage >= STEP_NUM)
 //        printf("CLOSED  tgt=%d  spd=%d/%d/%d/%d  pwm=%d/%d/%d/%d\r\n",
 //               Target_A, A_speed, B_speed, C_speed, D_speed, PWMA, PWMB, PWMC, PWMD);
@@ -788,9 +876,12 @@ static void System_Init(void)
     Key_Init();                             /* 板载按键 S1/S2 调速 */
     IMU_Init();                             /* IMU: UART1(PA8/PA9) RX 中断 + RX 上拉 */
     ImuTurn_Init();                         /* IMU 转向/保向层复位 */
+    Mission_Init();                         /* 任务状态机复位 (路线表在 middle/Mission.c) */
 
     Timer_Init();                           /* 1ms 时基: 清标志 + 开中断 */
     DL_TimerG_startCounter(TIMER_0_INST);   /* 启动 1ms 计数 -> 调度器时基 */
+
+    TimeSync_Init();                        /* 授时查询端复位: 等 1000ms 任务去读第一次 */
 
     LCD_Init();
     /* 上电自检: 刷 3 个纯色 + 清屏, 确认 LCD 在位 */
@@ -805,6 +896,8 @@ static void System_Init(void)
         Track_Init();                       /* 循迹 PID 初始化 */
         printf("\r\n==== TRACK mode: AuroraT8 (I2C0 PA0/PA1), 5ms loop ====\r\n");
         printf("KEY S2/PB21: click = start/stop, long press = speed up\r\n");
+        printf("TIME: I2C1 PA30(SDA)/PA29(SCL) -> ESP32-S2 @0x42 400kHz, calib %us\r\n",
+               (unsigned int)(TIMESYNC_CALIB_MS / 1000u));
     }
     else
     {
@@ -828,3 +921,29 @@ int main(void)
         Scheduler_Run();
     }
 }
+
+/*===========================================================================
+ * 任务状态机的钩子 (弱函数覆盖 middle/Mission.c 里的空实现)
+ *   Mission_OnWork(room): 到达房间/工作区, 已经停车 —— 以后测温/语音/LCD/LORA 挂这里
+ *   Mission_OnStepEnter:  每一步开始打一行串口 (台架调路线时很有用)
+ *   Mission_OnDone:       全程收工
+ * ★ 这些都在 5ms 任务里被调用, 别写长时间阻塞的代码 (要等就用 MS_WORK 步的毫秒数)
+ *===========================================================================*/
+#if MISSION_ENABLE
+void Mission_OnStepEnter(int step)
+{
+    printf("MSTEP %d %s\r\n", step, Mission_GetStepName());
+}
+
+void Mission_OnWork(int room)
+{
+    /* TODO(以后): 语音播报 -> MLX90614 测温 -> LCD 刷新 -> LORA 上传 */
+    /* 时间戳来自 I2C 授时模块 (未同步时是 0000-00-00 00:00:00, 用 TimeSync_Status() 判断) */
+    printf("MWORK room=%d t=%s (TODO: voice/temp/LCD/LORA)\r\n", room, TimeSync_GetStr());
+}
+
+void Mission_OnDone(void)
+{
+    printf("MDONE all steps finished\r\n");
+}
+#endif

@@ -139,6 +139,20 @@ extern "C" {
 #define GPIO_I2C_0_IOMUX_SCL                                      (IOMUX_PINCM2)
 #define GPIO_I2C_0_IOMUX_SCL_FUNC                       IOMUX_PINCM2_PF_I2C0_SCL
 
+/* Defines for I2C_TIME */
+#define I2C_TIME_INST                                                       I2C1
+#define I2C_TIME_INST_IRQHandler                                 I2C1_IRQHandler
+#define I2C_TIME_INST_INT_IRQN                                     I2C1_INT_IRQn
+#define I2C_TIME_BUS_SPEED_HZ                                             400000
+#define GPIO_I2C_TIME_SDA_PORT                                             GPIOA
+#define GPIO_I2C_TIME_SDA_PIN                                     DL_GPIO_PIN_30
+#define GPIO_I2C_TIME_IOMUX_SDA                                   (IOMUX_PINCM5)
+#define GPIO_I2C_TIME_IOMUX_SDA_FUNC                    IOMUX_PINCM5_PF_I2C1_SDA
+#define GPIO_I2C_TIME_SCL_PORT                                             GPIOA
+#define GPIO_I2C_TIME_SCL_PIN                                     DL_GPIO_PIN_29
+#define GPIO_I2C_TIME_IOMUX_SCL                                   (IOMUX_PINCM4)
+#define GPIO_I2C_TIME_IOMUX_SCL_FUNC                    IOMUX_PINCM4_PF_I2C1_SCL
+
 
 /* Defines for UART_0 */
 #define UART_0_INST                                                        UART0
@@ -353,6 +367,7 @@ void SYSCFG_DL_Motor_PWM_Front_init(void);
 void SYSCFG_DL_Motor_PWM_Back_init(void);
 void SYSCFG_DL_TIMER_0_init(void);
 void SYSCFG_DL_I2C_0_init(void);
+void SYSCFG_DL_I2C_TIME_init(void);
 void SYSCFG_DL_UART_0_init(void);
 void SYSCFG_DL_UART_2_init(void);
 void SYSCFG_DL_LORA_init(void);
