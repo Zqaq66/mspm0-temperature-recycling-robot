@@ -124,8 +124,8 @@
  *     TX  -> PA8     RX  -> PA9     (模块 TX 接 MCU RX, 交叉接)
  *     - 用 UART1, 115200-8-N-1, 25Hz 自动上报 (0x7E 0x23 帧); RX 内部上拉已开
  *     - 驱动 app/imu_uart_driver.c/.h (照搬 Competition_PJ/BSP/IMU, 只把 delay.h 换成 Time.h)
- *     - 屏上第7行 "YAW xxx RXn": RX = 每 100ms 收到的字节数, 正常约 70~80;
- *       恒为 0 说明没接好 / TX-RX 没交叉 / 波特率不对
+ *     - 屏上 IMU 行显示当前航向 yaw (灰字 = IMU 没数据: 没接好 / TX-RX 没交叉 / 波特率不对)
+ *       "RXn" (每 100ms 收到的字节数, 正常约 70~80) 要 LCD_DEBUG=1 才显示
  *
  *   [4.8] 上电前检查
  *     1) 万用表量 VM-GND / VCC-GND 不短路; VCC 实测 3.3V, VM 实测 12V
@@ -149,13 +149,14 @@
  *             B 中间消失 (|E| < 120): 线在中间突然没了 -> 保持直行 LOST_STRAIGHT_MS(500ms) -> 停车
  *             丢线头 60ms (LOST_KEEP_MS) 先保持上一拍输出 (防单帧误丢乱打);
  *             线一回来立刻自动恢复巡线 (不用按键)
- *   屏上:   第1行 8 路数字量 ('#'=压线, 左到右; 本地由阈值算)
- *           第2行 P质心(0~700) E误差(负=线偏左)
- *           第3行 L左轮PWM V弯道降速后的实际速度
- *           第4行 R右轮PWM
- *           第5行 STOP press S2 / LOST nnn(丢线时长 ms) / RUN Bxxx(按键设定的基础速度)
- *           第6行 I2CERR (必须恒为 0, 非 0 = I2C 没通)
- *           第7行 YAW 角度(度) + RX 每100ms收到的IMU字节数 (0 = IMU 没数据)
+ *   屏上 (工作模式 5 行, 一行 16 字符, 行距 16px 不重叠):
+ *           第1行 状态 + 基速: STOP press S2 / LOST nnn(丢线时长ms) / Mxx 步名 子状态 Bxxx
+ *           第2行 L左轮PWM R右轮PWM
+ *           第3行 P质心(0~700, 中心350) E误差(负=线偏左)
+ *           第4行 IMU 航向 yaw; 转向中变成 "Y 当前角 E 剩余角"
+ *           第5行 授时时间 (模块没联上网就不显示; 总线故障红字 TIME I2C ERR)
+ *           标定/查问题时把 LCD_DEBUG 改成 1, 会多出 3 行:
+ *             8 路点位('#'=压线) / X路口H房间电平 L主循环抖动 K按键扫描率 / V降速后速度 RX IMU字节 ERR灰度I2C错误
  *   调参:   全部在 middle/XunJi.c 顶部 (质心阈值/极性/镜像/LR、PD 与过渡带、D 低通、
  *           降速比、丢线参数) —— 见 [7] 的顺序
  *   注:     循迹用的是开环 PWM; 想接编码器速度环, 把 Motor_SetLeft/RightPWM() 换成写
@@ -203,8 +204,9 @@
  *   调参: middle/ImuTurn.h 顶部 —— 转向主要调 IMU_TURN_SPEED_MAX (远段速度) /
  *         IMU_TURN_CUT_MARGIN (老冲过头就 +1) / IMU_TURN_ARRIVE_DEG (想到位多准)。
  *         ★ 减速能力 a 不用手调: 每次转完自动标定, 串口 TURN done 那行会打出来。
- *   看现象: 屏第 7 行转向时是 "Y 当前角 E 剩余角 相位 角速度(度/秒)";
- *         相位: D=远段定速 C=近段低速 B=断电等停稳 P=脉冲微调; 平时是 "YAW xxx RXn"
+ *   看现象: 屏第 4 行平时是 "YAW +xx"(当前航向), 转向中变成 "Y +xx E +xx"(当前角/剩余角)
+ *         ★ 调转向参数要看相位和角速度: 把 LCD_DEBUG 改成 1, 转向中会显示 "Y… E… 相位 角速度"
+ *           相位: D=远段定速 C=近段低速 B=断电等停稳 P=脉冲微调
  *   演示: 把本文件顶部的 IMU_TURN_DEMO 改成 1 -> 单击 S2 后自动跑
  *         "原地左转 90 -> 保持该航向直行 2s -> 停车"
  *
@@ -217,12 +219,13 @@
  *        越偏越往错方向打(纠正方向反)     -> middle/XunJi.c  TRACK_LR_SWAP 改 1
  *        白底数值反而比黑线大(极性反)     -> middle/XunJi.c  TRACK_DARK_IS_HIGH 改 0
  *
- *   1) 传感器自检 (车架起来, 单击 S2 先别让它跑): 屏第1行 8 个符号随黑线变 '#'
- *        拿黑线依次挡每个探头, 位置一一对应;  I2CERR 必须恒为 0 (非 0 = I2C 没通)
+ *   1) 传感器自检 (车架起来, 单击 S2 先别让它跑): 先把 LCD_DEBUG 改成 1
+ *        屏上会多出 8 个点位符号, 拿黑线依次挡每个探头, 位置一一对应
+ *        ERR 必须恒为 0 (非 0 = 灰度 I2C 没通)
  *
- *   2) 基础速度 (单击 S2 开始 / 长按加速, 屏上 RUN Bxxx):
+ *   2) 基础速度 (单击 S2 开始 / 长按加速, 屏第1行 RUN Bxxx):
  *        先在 250 ~ 400 把循迹调稳, 稳了再往上提; 提速后 Kp 一般要同步降一点
- *        屏上 Vxxx 是"弯道降速后"的实际速度: 过弯时它自己掉下来 = 降速在工作
+ *        (LCD_DEBUG=1 时屏上有 Vxxx = "弯道降速后"的实际速度: 过弯时它掉下来 = 降速在工作)
  *
  *   3) 转向 PD (Q10 定点, 1024 = 1.0) —— middle/XunJi.c 顶部
  *        TRACK_KP / TRACK_KD          弯道段增益 (默认 1000 / 1200)
@@ -234,7 +237,7 @@
  *        弯道切内线/出线 -> TRACK_KP 调大 (1000 -> 1300), 同时把基础速度降一档
  *        过冲/回摆大     -> TRACK_KD 调大 (1200 -> 1800), 或把 D_FILTER_STRENGTH 加到 4
  *        过弯太慢/太急   -> CURVE_REDUCE_PCT 调小 / 调大
- *        屏上 P 跳变、E 不连续 -> NOISE_THRESHOLD (默认 30) 太大, 或极性反了
+ *        屏第3行 P 跳变、E 不连续 -> NOISE_THRESHOLD (默认 30) 太大, 或极性反了
  *
  *   4) 丢线参数 (middle/XunJi.c 顶部):
  *        LOST_SIDE_ERR(120)        判"偏出"还是"中间消失"的 |error| 分界
@@ -243,7 +246,7 @@
  *        LOST_FIND_TIMEOUT_MS(2500) 偏出找回多久还没找到就停车 (填 0 = 一直找)
  *        LOST_STRAIGHT_MS(500)     中间消失后直行多久停车
  *        LOST_KEEP_MS(60)          丢线头去抖窗口 (保持上一拍输出)
- *        屏上 LOST nnn 是丢线时长(ms): 一直涨 = 没找回; 停在 500 附近 = 中间消失已停车;
+ *        屏第1行 LOST nnn 是丢线时长(ms): 一直涨 = 没找回; 停在 500 附近 = 中间消失已停车;
  *        停在 2500 附近 = 偏出找超时停车
  *
  *   5) 闭环速度环 (只跑电机测试模式; SKIP_OPEN_LOOP=1 上电直接进闭环)
@@ -304,8 +307,14 @@ uint8_t app_run = 0;
  * 应用层用完自己清 0 (完成原因看 ImuTurn_GetDoneReason()) */
 uint8_t imu_turn_done = 0;
 
-/* ---- 诊断行开关: 1 = 第6行显示 I/L/K (I2C错误/主循环间隔/按键扫描率), 0 = 显示 I2CERR */
-#define LCD_DIAG        1
+/* ---- 屏幕调试行开关 ----
+ * 0 = 工作 (默认): 只显示 5 行工作信息, 屏干净
+ *                   第1行 状态+基速 / 第2行 左右PWM / 第3行 质心误差 / 第4行 IMU航向 / 第5行 时间
+ * 1 = 台架调试  : 额外多出 3 行 (8路点位 / X H L K / V RX ERR)
+ *                   标定传感器、查路口检测、查实时性时打开; 平时关掉 */
+#ifndef LCD_DEBUG          /* 也可以用 Keil 的 Misc Controls 加 -DLCD_DEBUG=1 覆盖 */
+#define LCD_DEBUG       0
+#endif
 
 /*---------------------------------------------------------------------------
  * 1ms 中断钩子: 按键扫描放这里
@@ -471,22 +480,39 @@ static void lcd_row(int y, char *buf, unsigned fc)
 }
 
 /*---------------------------------------------------------------------------
- * LCD 第7行: IMU 状态 —— YAW 角度(度) + 每 100ms 收到的字节数
- *   IMU 以 25Hz 上报, 每帧约 30 字节 -> 正常时 RX 显示 70~80;
- *   IMU 没接 / 接反 / 波特率不对 -> RX 恒为 0 (YAW 也不动)
+ * 行布局 —— y 只能是 16 的倍数 (0,16,32,...,144)
+ *   屏 128x160, 16 号字 = 8px 宽 x 16px 高 -> 一行 16 字符, 竖着正好 10 行。
+ *   ★ 别再引入非 16 倍数的 y: 以前用过 y=136, 字高 16 -> 占到 151, 和 y=144 那行
+ *     叠了 8 个像素, 屏上就是两行糊在一起 (2026-10-06 修掉)。
+ *   工作模式 (LCD_DEBUG=0) 只用 R_STEP..R_TIME 这 5 行; 调试模式再加 R_BITS..R_IO。
  *-------------------------------------------------------------------------*/
-static void LCD_imu(void)
+#define LCD_Y(n)     ((n) * 16)          /* 行号 -> y 像素, n = 0..9 */
+#define R_STEP       0                   /* 步骤/状态 + 基速 (或 STOP / LOST) */
+#define R_PWM        1                   /* 左右轮 PWM */
+#define R_TRACK      2                   /* 质心 + 误差 */
+#define R_IMU        3                   /* IMU 航向 (转向时 + 剩余角) */
+#define R_TIME       4                   /* 授时时间 (未同步时整行空) */
+#define R_BITS       5                   /* [仅调试] 8 路点位 */
+#define R_DIAG       6                   /* [仅调试] X/H 电平 + 主循环抖动 + 按键扫描率 */
+#define R_IO         7                   /* [仅调试] 降速后速度 + IMU 字节 + 灰度I2C错误 */
+
+
+/*---------------------------------------------------------------------------
+ * IMU 行 (工作模式占 R_IMU = 第4行)
+ *   平时:   "YAW   +12"      当前航向(度), 已按 IMU_TURN_YAW_SIGN 校正并归一化
+ *   转向中: "Y +12 E +78"    当前航向 + 距目标的剩余角(度)
+ *   颜色:   绿 = 有数据, 灰 = IMU 没数据; 转向中黄色
+ *   ★ 调转向参数时要看相位(D远段/C近段/B等停稳/P脉冲)和角速度 -> 把 LCD_DEBUG 改成 1,
+ *     转向中就会显示成 "Y +12 E +78 D 113" (正好 16 字符)
+ *-------------------------------------------------------------------------*/
+static void LCD_imu(int row)
 {
-    static uint32_t last_rx = 0;
-    char     buf[24];
-    uint32_t rx = IMU_GetRxByteCount();
-    float    euler[3];
-    int      yaw = 0;
-    unsigned rx_delta = (unsigned)(rx - last_rx);
+    char  buf[24];
+    float euler[3];
+    int   yaw = 0;
+    int   ok  = (IMU_GetEuler(euler) == 0);
 
-    last_rx = rx;
-
-    if (IMU_GetEuler(euler) == 0)
+    if (ok)
     {
         /* 按 IMU_TURN_YAW_SIGN 校正并归一化到 (-180,180]: 屏上的 yaw 和命令同向 (+ = 左转),
          * 而且从任意角度起都不会显示成 -350 这种值。
@@ -497,32 +523,36 @@ static void LCD_imu(void)
         yaw = (int)((y >= 0.0f) ? (y + 0.5f) : (y - 0.5f));
     }
 
-    if (ImuTurn_IsBusy())                    /* 转向/保向中: yaw + 剩余角 + 相位 + 角速度 */
+    if (ImuTurn_IsBusy())                        /* 转向/保向中: 当前角 + 剩余角 */
     {
-        int w = (int)ImuTurn_GetRate();              /* 夹到 +-99: 一行只有 16 字符 (Y/E 各占 5) */
+#if LCD_DEBUG
+        int w = (int)ImuTurn_GetRate();          /* 调试时补上相位和角速度 (调转向参数用) */
         if (w >  99) w =  99;
         if (w < -99) w = -99;
-        sprintf(buf, "Y%+4d E%+4d %c%3d", yaw, (int)ImuTurn_GetDiff(),
-                ImuTurn_GetPhase(), w);   /* 相位: D远段定速 C近段低速 B断电等停稳 P脉冲微调 */
-        lcd_row(136, buf, YELLOW);
+        sprintf(buf, "Y%+4d E%+4d %c%3d", yaw, (int)ImuTurn_GetDiff(), ImuTurn_GetPhase(), w);
+#else
+        sprintf(buf, "Y%+4d E%+4d", yaw, (int)ImuTurn_GetDiff());
+#endif
+        lcd_row(LCD_Y(row), buf, YELLOW);
     }
-    else                                     /* 平时: 显示 RX, 用来看 IMU 通没通 */
+    else                                         /* 平时: 只显示当前航向 */
     {
-        if (rx_delta > 999) rx_delta = 999;
-        sprintf(buf, "YAW %+5d RX%3u", yaw, rx_delta);
-        lcd_row(136, buf, rx_delta ? GREEN : GRAY);
+        sprintf(buf, "YAW   %+5d", yaw);
+        lcd_row(LCD_Y(row), buf, ok ? GREEN : GRAY);   /* 灰 = IMU 没数据 */
     }
 }
 
+
 /*---------------------------------------------------------------------------
- * 第8行(y=144): 授时时间 —— 只在"时间可用"时显示, 未同步就整行清空
- *   屏 128x160, 16 号字一行 16 字符; y=144 是最后一行(到 160), 原来没被占用。
- *   显示 "10-05 20:31:07" (14 字符): 含秒, 但秒是本板自己走出来的, 不用每秒读总线。
- *   st ==  1: 绿字 ; st == 0: 空白(模块还没联上网, 正常, 不报警) ; st == -1: 红字(接线问题)
+ * 授时时间行 (工作模式占 R_TIME = 第5行)
+ *   st ==  1: 绿字 "10-06 14:05:23" (14 字符) —— 秒是本板自己走出来的, 不用每秒读总线
+ *   st ==  0: 整行空 (模块还没联上网; 上电 3~5s 内属正常, 不报警)
+ *   st == -1: 红字 "TIME I2C ERR" (总线故障: 查线/上拉/供电)
+ *   ts_last_status: 给 1000ms 任务判断"状态变了没", 只在变化时打一行串口
  *-------------------------------------------------------------------------*/
 static int ts_last_status = 99;     /* 授时状态上报用: 1000ms 任务里看它变没变 */
 
-static void LCD_clock(void)
+static void LCD_clock(int row)
 {
     char buf[24];
     int  st = TimeSync_Status();
@@ -530,113 +560,120 @@ static void LCD_clock(void)
     if (st == 1)
     {
         sprintf(buf, "%s", TimeSync_GetClock());
-        lcd_row(144, buf, GREEN);
+        lcd_row(LCD_Y(row), buf, GREEN);
     }
     else if (st == 0)
     {
         buf[0] = 0;                                  /* 按要求: 未同步不显示 */
-        lcd_row(144, buf, GRAY);
+        lcd_row(LCD_Y(row), buf, GRAY);
     }
     else
     {
-        sprintf(buf, "TIME I2C ERR   ");             /* 总线故障: 查线/上拉/供电 */
-        lcd_row(144, buf, RED);
+        sprintf(buf, "TIME I2C ERR");                /* 总线故障: 查线/上拉/供电 */
+        lcd_row(LCD_Y(row), buf, RED);
     }
 }
 
+
 /*---------------------------------------------------------------------------
- * LCD 状态显示 (只刷文字, 不做整屏刷新, 免得拖慢 20ms 环)
+ * 电机测试模式 (APP_MODE_MOTOR_TEST) 的 LCD —— 台架验证用, 8 行
+ *   第1行 阶段+名字 / 第2-3行 PWM A~D / 第4-5行 实测速度 A~D /
+ *   第6行 闭环目标 OPEN|CLOSED / 第7行 IMU 航向 / 第8行 授时时间
+ *   只刷文字, 不做整屏刷新 (整屏刷会拖慢 20ms 环)
  *-------------------------------------------------------------------------*/
 static void LCD_status(void)
 {
     char buf[24];
 
-    if (!app_run)              sprintf(buf, "STOP  press S2 ");
+    if (!app_run)               sprintf(buf, "STOP  press S2 ");
     else if (stage >= STEP_NUM) sprintf(buf, "CLOSED LOOP    ");
-    else                       sprintf(buf, "%2d %-11s", stage + 1, steps[stage].name);
-    lcd_row(0, buf, app_run ? YELLOW : RED);
+    else                        sprintf(buf, "%2d %-11s", stage + 1, steps[stage].name);
+    lcd_row(LCD_Y(0), buf, app_run ? YELLOW : RED);
 
     sprintf(buf, "PWM A%4d B%4d", PWMA, PWMB);     /* 15 字符 */
-    lcd_row(24, buf, WHITE);
+    lcd_row(LCD_Y(1), buf, WHITE);
 
     sprintf(buf, "PWM C%4d D%4d", PWMC, PWMD);     /* 15 字符 */
-    lcd_row(40, buf, WHITE);
+    lcd_row(LCD_Y(2), buf, WHITE);
 
     sprintf(buf, "SPD A%4d B%4d", A_speed, B_speed);  /* 15 字符 */
-    lcd_row(64, buf, GREEN);
+    lcd_row(LCD_Y(3), buf, GREEN);
 
     sprintf(buf, "SPD C%4d D%4d", C_speed, D_speed);  /* 15 字符 */
-    lcd_row(80, buf, GREEN);
- 
+    lcd_row(LCD_Y(4), buf, GREEN);
+
     if (stage >= STEP_NUM) sprintf(buf, "TGT %4d CLOSED", Target_A);
     else                   sprintf(buf, "TGT ---- OPEN  ");
-    lcd_row(104, buf, CYAN);
+    lcd_row(LCD_Y(5), buf, CYAN);
 
-    LCD_imu();                               /* 第7行: IMU YAW + 收字节数 */
-
-    LCD_clock();                             /* 第8行: 授时时间 (未同步不显示) */
+    LCD_imu(6);                              /* 第7行 */
+    LCD_clock(7);                            /* 第8行 */
 }
 
+
 /*---------------------------------------------------------------------------
- * 循迹模式: LCD 显示
- *   第1行 8 路数字量: '#'=压线 '.'=未压线 (bit0 最左, bit7 最右)
+ * 循迹模式 (APP_MODE_TRACK) 的 LCD —— 工作模式 5 行, 不重叠/不超屏
+ *   R_STEP  第1行 状态 + 基速: STOP press S2 / LOST nnn(丢线) / Mxx 步名 子状态 Bxxx
+ *   R_PWM   第2行 左右轮 PWM
+ *   R_TRACK 第3行 P 质心(0~700, 中心350) E 误差(负 = 线偏左)
+ *   R_IMU   第4行 IMU 航向 (转向中 = 当前角 + 剩余角)
+ *   R_TIME  第5行 授时时间 (未同步时不显示)
+ *   LCD_DEBUG=1 再补 3 行: 8路点位 / X H L K / V RX ERR (标定和查问题时用)
  *-------------------------------------------------------------------------*/
 static void LCD_track(void)
 {
     char buf[24];
-    int  i;
 
-    for (i = 0; i < 8; i++) buf[i] = ((track_bits >> i) & 0x01) ? '.' : '#';
-    buf[8] = ' '; buf[9] = ' '; buf[10] = 0;
-    lcd_row(0, buf, GREEN);
-
-    /* P = 质心位置(0~700, 中心350), E = 误差(负=线偏左) */
-    sprintf(buf, "P%3d E%+4d", track_pos, track_error);
-    lcd_row(24, buf, YELLOW);
-
-    /* L = 左轮 PWM, V = 弯道降速后的实际速度 */
-    sprintf(buf, "L%+4d V%3d", track_left_pwm, track_speed);   /* 10 字符, 留余量 */
-    lcd_row(48, buf, WHITE);
-
-    sprintf(buf, "R%+4d", track_right_pwm);
-    lcd_row(64, buf, WHITE);
-
-    /* B = 按键设定的基础速度 */
-    if (!app_run)        sprintf(buf, "STOP  press S2");
-    else if (track_lost) sprintf(buf, "LOST %-5d   ", track_lost);
+    /* 第1行: 状态 —— 停 / 丢线 / 状态机步号+子状态 / 纯循迹, 后两种都带基速 B */
+    if (!app_run)                sprintf(buf, "STOP  press S2  ");
+    else if (track_lost)         sprintf(buf, "LOST %-5d     ", track_lost);
 #if MISSION_ENABLE
-    else if (Mission_IsActive())
-                         sprintf(buf, "%sB%3d", Mission_GetStatus(), Track_GetBaseSpeed());
+    else if (Mission_IsActive()) sprintf(buf, "%s B%3d", Mission_GetStatus(), Track_GetBaseSpeed());
 #endif
-    else                 sprintf(buf, "RUN   B%3d   ", Track_GetBaseSpeed());
-    lcd_row(88, buf, app_run ? CYAN : RED);
+    else                         sprintf(buf, "RUN    B%3d  ", Track_GetBaseSpeed());
+    lcd_row(LCD_Y(R_STEP), buf, app_run ? CYAN : RED);
 
-#if LCD_DIAG
-    {   /* 诊断行: I = I2C 错误数 | L = 5ms 任务这100ms内最坏间隔(ms, 正常 5) | K = 按键扫描次数/100ms(正常≈100)
-         * L 变大(几十 ms) = 主循环被某个任务卡住了 (现在基本就是 LCD 刷屏那一下)
-         * K 明显小于 100 = 1ms 钩子没在跑; K 变红就是这个意思 */
+    /* 第2行: 左右轮 PWM */
+    sprintf(buf, "L%+4d R%+4d", track_left_pwm, track_right_pwm);
+    lcd_row(LCD_Y(R_PWM), buf, WHITE);
+
+    /* 第3行: 质心 + 误差 */
+    sprintf(buf, "P%3d E%+4d", track_pos, track_error);
+    lcd_row(LCD_Y(R_TRACK), buf, YELLOW);
+
+    LCD_imu(R_IMU);                          /* 第4行: 航向 (转向中 + 剩余角) */
+    LCD_clock(R_TIME);                       /* 第5行: 授时时间 (未同步不显示) */
+
+#if LCD_DEBUG
+    {   /* 以下 3 行只在 LCD_DEBUG=1 时显示: 标定传感器 / 查路口检测 / 查实时性 */
         static uint16_t last_key = 0;
         static uint16_t loop_max = 0;
+        static uint32_t last_rx  = 0;
         uint16_t k;
+        uint32_t rx = IMU_GetRxByteCount();
+        unsigned rx_delta = (unsigned)(rx - last_rx);
+        int      i;
 
-        if (app_loop_ms > loop_max) loop_max = app_loop_ms;
-        k        = (uint16_t)(key_scan_cnt - last_key);
+        last_rx = rx;
+
+        for (i = 0; i < 8; i++) buf[i] = ((track_bits >> i) & 0x01) ? '.' : '#';
+        buf[8] = 0;
+        lcd_row(LCD_Y(R_BITS), buf, GREEN);
+
+        if (app_loop_ms > loop_max) loop_max = app_loop_ms;    /* 5ms 任务最坏间隔 (正常 5) */
+        k        = (uint16_t)(key_scan_cnt - last_key);        /* 1ms 按键扫描次数 (正常≈100) */
         last_key = key_scan_cnt;
-
-        /* X = 路口电平(最左/最右压线), H = 房间黑块电平(大面积压线) */
         sprintf(buf, "X%d H%d L%2d K%3d", track_cross, track_room, loop_max, k);
-        lcd_row(112, buf, (k < 50) ? RED : GRAY);   /* K 变红 = 1ms 按键扫描没在跑(不正常) */
+        lcd_row(LCD_Y(R_DIAG), buf, (k < 50) ? RED : GRAY);
         loop_max = 0;
+
+        if (rx_delta > 999) rx_delta = 999;
+        sprintf(buf, "V%3d RX%3u E%2d", track_speed, rx_delta, track_i2c_err);
+        lcd_row(LCD_Y(R_IO), buf, track_i2c_err ? RED : GRAY);
     }
-#else
-    sprintf(buf, "I2CERR %-4d   ", track_i2c_err);
-    lcd_row(112, buf, track_i2c_err ? RED : GRAY);
 #endif
-
-    LCD_imu();                               /* 第7行: IMU YAW + 收字节数 */
-
-    LCD_clock();                             /* 第8行: 授时时间 (未同步不显示) */
 }
+
 
 /*---------------------------------------------------------------------------
  * 5ms 任务: 循迹 (读灰度 + 控制)
