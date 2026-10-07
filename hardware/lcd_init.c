@@ -34,6 +34,29 @@ void LCD_Writ_Bus(u8 dat)
     LCD_CS_Set();
 }
 
+/*---------------------------------------------------------------------------
+ * 批量(流式)写 —— 2026-10-06 新增, 说明见 lcd_init.h
+ *   CS 只在最外面翻一次; 字节之间不等, 靠 TX FIFO 满标志节流, SPI 不出现空隙。
+ *   例程 LCD_Writ_Bus 保持原样 (老代码/老行为不受影响)。
+ *---------------------------------------------------------------------------*/
+void LCD_Writ_BusBegin(void)
+{
+    LCD_CS_Clr();
+}
+
+void LCD_Writ_BusEnd(void)
+{
+    while (DL_SPI_isBusy(LCD_SPI_INST)) {}  /* 等最后一字节完全移出再释放 CS */
+    LCD_CS_Set();
+}
+
+void LCD_Writ_BusBulk(const u8 *buf, u32 len)
+{
+    LCD_Writ_BusBegin();
+    while (len--) LCD_Writ_BusStream(*buf++);
+    LCD_Writ_BusEnd();
+}
+
 void LCD_WR_DATA8(u8 dat)   { LCD_Writ_Bus(dat); }
 void LCD_WR_DATA(u16 dat)   { LCD_Writ_Bus(dat>>8); LCD_Writ_Bus(dat); }
 

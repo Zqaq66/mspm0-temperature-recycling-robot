@@ -21,6 +21,13 @@ void LCD_ShowFixedNum1(u16 x,u16 y,int32_t value_Q10,u8 len,u16 fc,u16 bc,u8 siz
 
 void LCD_ShowPicture(u16 x,u16 y,u16 length,u16 width,const u8 pic[]);
 
+/* 批量刷屏 + 文字层 (2026-10-06 新增, 非阻塞; 原理和时序见 lcd.c 顶部) */
+#define LCD_ROWS   10                                 /* 屏高 160 / 字高 16 */
+void LCD_ShowRowFast(u16 x,u16 y,const char *s,u16 fc,u16 bc);   /* 一行 4096B 一次推完 0.82ms */
+void LCD_FillFast(u16 xsta,u16 ysta,u16 xend,u16 yend,u16 color);/* 整块填充, CS 只翻一次 */
+void LCD_RowSet(u8 row, const char *txt, u16 fc);    /* 写文字影子: 只动 RAM, 立即返回 */
+u8   LCD_RowFlush(void);                             /* 主循环里调: 1ms 最多推 1 行 */
+
 /* Colors */
 #define WHITE     0xFFFF
 #define BLACK     0x0000

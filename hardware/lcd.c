@@ -2,6 +2,7 @@
 #include "lcd_init.h"
 #include "lcdfont.h"
 #include "Time.h"   /* DZZH: delay_ms() 在 BSP/Time.c */
+#include "Timer.h"  /* DZZH: Get_Time() 1ms 时基 (刷屏节流用) */
 
 /******************************************************************************
       函数说明：在指定区域填充颜色
@@ -389,4 +390,152 @@ void LCD_ShowHexBuf(u16 x,u16 y,u8 *buf,u8 len,u16 fc,u16 bc,u8 sizey)
         if (l < 10) LCD_ShowChar(x + i * step + sizey/2, y, l + 0x30, fc, bc, sizey, 0);
         else        LCD_ShowChar(x + i * step + sizey/2, y, l - 10 + 0x41, fc, bc, sizey, 0);
     }
+}
+
+/*===========================================================================
+ *  批量刷屏 + 文字层 (2026-10-06 新增)
+ *    ★ 上面那些例程函数一个字没改: 需要老行为(逐字节 / 叠加模式 / 12~32 号字)照旧用。
+ *
+ *  为什么要加:
+ *    老路径 1 个字符 = 263 次 LCD_Writ_Bus (7 次窗口命令 + 128 像素 x2), 16 字符一行
+ *    约 4208 次事务 约 14ms, 8~10 行 约 114ms —— 5ms 控制环被顶成 8.7Hz
+ *    (屏上诊断行 L 一直报 114/115), 跑车 100ms 盲开, 弯道直接甩出去。
+ *
+ *  现在怎么做:
+ *   1) LCD_ShowRowFast(): 一行 16 个 16 号字 = 128x16 像素, CS 只翻一次推 4096 字节
+ *      (0.82ms), 而且直接按行读 ascii_1608 字体, 没有中间显存 -> 不占 RAM。
+ *      像素顺序/颜色/字节序与 LCD_ShowChar(非叠加模式) 完全一致。
+ *   2) 文字层 LCD_RowSet() / LCD_RowFlush(): 调用者只写"文字影子"(纯 RAM, 几 us 就返回),
+ *      真正推屏由 LCD_RowFlush() 在主循环里做, 而且 1ms 最多推 1 行 (闸门) ——
+ *      单次最多占 1ms, 控制环的夹缝里就把屏刷完了, 谁也不会把谁卡住。
+ *      后面加测温 / 语音 / LORA 也只是往自己那行 LCD_RowSet(...) 一下就完事。
+ *   3) 内容没变就不刷: LCD_RowSet 先比对影子, 文字和颜色都一样就不置脏 ->
+ *      静止画面 0 SPI 流量, 一个字节都不发。
+ *===========================================================================*/
+
+#define LCD_ROW_NUM   10                        /* 160 / 16 = 10 行 */
+#define LCD_ROW_COLS  16                        /* 128 / 8  = 16 字符/行 */
+
+static char lcd_txt[LCD_ROW_NUM][LCD_ROW_COLS]; /* 每行 16 字符 (无结束符, 不足的补空格) */
+static u16  lcd_fc [LCD_ROW_NUM];               /* 每行颜色 */
+static u16  lcd_dirty = 0;                      /* bit i = 第 i 行有变化, 等刷新 (10 行要 10 位!) */
+static u8   lcd_rr    = 0;                      /* 下次从哪行开始找 (轮转, 防某行饿死) */
+static u32  lcd_flush_ms = 0;                   /* 上次推屏时间戳 (1ms 闸门) */
+
+/*---------------------------------------------------------------------------
+ * 写一行文字影子 —— 只动 RAM, 不碰 SPI, 几 us 返回。
+ *   不足 16 字符补空格 (盖掉上一帧残字), 超过 16 字符截断 (不许印到屏外)。
+ *   文字和颜色都没变 -> 不置脏, 后面一次 SPI 都不会发。
+ *---------------------------------------------------------------------------*/
+void LCD_RowSet(u8 row, const char *txt, u16 fc)
+{
+    u8 i, changed = 0;
+
+    if (row >= LCD_ROW_NUM) return;
+
+    for (i = 0; i < LCD_ROW_COLS; i++)
+    {
+        /* ★ 必须"读到 '\0' 就停, 后面一律空格": 不能写成 txt[i] 逐个下标判 —
+         *   那样会读过字符串结尾, 字符串字面量后面紧挨着别的字面量, 会把垃圾字符补进来
+         *   (上屏就是乱码; 短串尤其明显, 比如授时未同步时传进来的空串)。
+         *   老 empty.c 的 lcd_row 是先数到 '\0' 再补空格, 这里保持一致。 */
+        char ch = ' ';
+        if (txt && *txt) ch = *txt++;
+        if (lcd_txt[row][i] != ch) { lcd_txt[row][i] = ch; changed = 1; }
+    }
+    if (changed || lcd_fc[row] != fc)
+    {
+        lcd_fc[row] = fc;
+        lcd_dirty |= (u16)(1u << row);
+    }
+}
+
+/*---------------------------------------------------------------------------
+ * 一行 (x .. x+127, y .. y+15) 一次推完: 16 行 x 16 字 x 8 像素 x 2 字节 = 4096 字节。
+ *   字体按行读: ascii_1608[ch-' '][r], 每个字节的 bit t 就是第 t 个像素(低位在左),
+ *   与 LCD_ShowChar 非叠加模式逐点输出的结果一模一样。
+ *---------------------------------------------------------------------------*/
+void LCD_ShowRowFast(u16 x, u16 y, const char *s, u16 fc, u16 bc)
+{
+    u8 cc[LCD_ROW_COLS];                            /* 16 字节栈上小缓冲 (不占 RAM 区) */
+    u8 r, c, t, b, zero = 0;
+
+    /* 先把 16 个字符解析出来: 读到 '\0' 就停, 后面一律空格 (绝不读过字符串结尾),
+     * 非 ASCII / 控制字符也按空格 —— LCD_ShowRowFast 允许直接传短字符串, 比如 "AB" */
+    for (c = 0; c < LCD_ROW_COLS; c++)
+    {
+        u8 ch = 0x20;
+        if (!zero && s)                             /* s == NULL 也安全: 全空格 */
+        {
+            ch = (u8)s[c];
+            if (ch == 0) { zero = 1; ch = 0x20; }
+        }
+        if (ch < 0x20 || ch > 0x7E) ch = 0x20;      /* 只支持 ASCII, 越界按空格(防数组越界) */
+        cc[c] = ch;
+    }
+
+    LCD_Address_Set(x, y, (u16)(x + LCD_ROW_COLS * 8 - 1), (u16)(y + 15));
+    LCD_Writ_BusBegin();
+    for (r = 0; r < 16; r++)                        /* 16 行像素 */
+    {
+        for (c = 0; c < LCD_ROW_COLS; c++)          /* 一行 16 个字符 */
+        {
+            b = ascii_1608[cc[c] - 0x20][r];
+            for (t = 0; t < 8; t++)                 /* 一个字符 8 个像素宽 */
+            {
+                u16 col = (b & (1u << t)) ? fc : bc;
+                LCD_Writ_BusStream((u8)(col >> 8)); /* 与 LCD_WR_DATA 一致: 高字节在前 */
+                LCD_Writ_BusStream((u8)col);
+            }
+        }
+    }
+    LCD_Writ_BusEnd();
+}
+
+/*---------------------------------------------------------------------------
+ * 整块填充 —— 参数与例程 LCD_Fill 相同, 但 CS 只翻一次。
+ *   整屏 128x160 = 40960 字节 = 8.2ms (老路径约 0.28s, 上电自检 4 次纯色就是 1.1s)
+ *   上电自检 / 清屏 / 画色块都该用它。
+ *---------------------------------------------------------------------------*/
+void LCD_FillFast(u16 xsta, u16 ysta, u16 xend, u16 yend, u16 color)
+{
+    u32 n;
+    u8  hi = (u8)(color >> 8), lo = (u8)(color & 0xFF);
+
+    if (xend <= xsta || yend <= ysta) return;       /* 空区域直接返回 */
+    n = (u32)(xend - xsta) * (u32)(yend - ysta);
+
+    LCD_Address_Set(xsta, ysta, (u16)(xend - 1), (u16)(yend - 1));
+    LCD_Writ_BusBegin();
+    while (n--) { LCD_Writ_BusStream(hi); LCD_Writ_BusStream(lo); }
+    LCD_Writ_BusEnd();
+}
+
+/*---------------------------------------------------------------------------
+ * 主循环里反复调 —— 1ms 最多推 1 行 (闸门), 推了一行返回 1, 没脏行返回 0。
+ *   放在 main() 的 while(1) 里: 控制环 5ms 一拍, 这里每次最多占 1ms, 夹缝刷完。
+ *   闸门靠 Get_Time() (1ms 才变): 同 1ms 内第二次进来直接返回, 不会连着刷好几行。
+ *---------------------------------------------------------------------------*/
+u8 LCD_RowFlush(void)
+{
+    u32 now;
+    u8  n, r;
+
+    if (!lcd_dirty) return 0;                       /* 没变化: 一次 SPI 都不发 */
+    now = Get_Time();
+    if (now == lcd_flush_ms) return 0;              /* 1ms 闸门 */
+    lcd_flush_ms = now;
+
+    for (n = 0; n < LCD_ROW_NUM; n++)               /* 轮转找一行脏的 (不饿死任何一行) */
+    {
+        r = (u8)((lcd_rr + n) % LCD_ROW_NUM);
+        if (lcd_dirty & (u16)(1u << r))
+        {
+            lcd_dirty &= (u16)~(1u << r);
+            lcd_rr = (u8)((r + 1) % LCD_ROW_NUM);
+            LCD_ShowRowFast(0, (u16)(r * 16), lcd_txt[r], lcd_fc[r], BLACK);
+            return 1;
+        }
+    }
+    return 0;
 }

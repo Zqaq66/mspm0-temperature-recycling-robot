@@ -48,9 +48,14 @@
  *   10ms     处理按键事件: 单击启停 / 长按调速      同左 (调的是闭环目标)
  *            (Key_Scan() 本身在 1ms 中断钩子里跑, 事件缓存后这里取走)
  *   20ms     编码器采样 + IMU 解析                   开环阶段表 / 四路闭环速度环, 写 PWM
- *   100ms    LCD_track()                           阶段推进 + LCD_status()
+ *   100ms    LCD_track() 只写文字影子(不碰 SPI)     阶段推进 + LCD_status()
  *   1000ms   串口日志 (默认整段注释掉)              同左
+ *   主循环    LCD_RowFlush(): 每 1ms 最多推 1 行屏 (<=0.9ms) —— 别的模块不用等 LCD
  *   注: 5ms 槽在 IMU 转向/保向忙时改跑 ImuTurn_Update() —— 两者不会同时写 PWM
+ *   注: 路口/转弯由 Mission 决定: 岔路口看路线表"要不要转"(方向由传感器判),
+ *       普通弯车自己转; 转弯前先盲走 MS_ADV_MS (补传感器前伸的距离) 再原地转
+ *   注: 推屏开销摊在主循环夹缝里, 不占任何任务槽, 也不会把 5ms 控制环顶掉。
+ *       (改造前是 100ms 任务里整块刷 114ms, 把主循环卡死, 屏上 L 一直报 114/115)
  *   时基: TIMER_0 = 1ms 中断 -> Get_Time();  printf 出口 = LORA 口 UART3 (PB2/PB3, 9600)
  *
  * ============================ [3] 板载按键 (只用 S2 = PB21, 无需接线) ============================
@@ -115,9 +120,12 @@
  *     - 与 MLX90614 (0x5A) 共用同一条 I2C0 总线
  *     - 探头朝下, 8 路垂直于前进方向横排, 居中安装
  *
- *   [4.6] LCD (ST7735S 128x160, 硬件 SPI1)
+ *   [4.6] LCD (ST7735S 128x160, 硬件 SPI1 = PB9/PB8, 40MHz)
  *     SCLK -> PB9     SDA/MOSI -> PB8     RES -> PB10
  *     DC   -> PB11    CS -> PB14          BLK -> PB26      VCC -> 3V3, GND -> 共地
+ *     - 刷屏走批量通道 (hardware/lcd.c 的 LCD_ShowRowFast / LCD_FillFast): CS 只翻一次,
+ *       一行 4096 字节 0.82ms, 整屏填充 8.2ms; 文字层 LCD_RowSet/LCD_RowFlush 非阻塞
+ *       (写影子 + 主循环 1ms 一行), 所以 LCD 不会卡住循迹/转向/以后的测温语音模块
  *
  *   [4.7] IMU (YbIMU 六轴, 姿态/转向用)
  *     VCC -> 3V3     GND -> 共地
@@ -156,7 +164,9 @@
  *           第4行 IMU 航向 yaw; 转向中变成 "Y 当前角 E 剩余角"
  *           第5行 授时时间 (模块没联上网就不显示; 总线故障红字 TIME I2C ERR)
  *           标定/查问题时把 LCD_DEBUG 改成 1, 会多出 3 行:
- *             8 路点位('#'=压线) / X路口H房间电平 L主循环抖动 K按键扫描率 / V降速后速度 RX IMU字节 ERR灰度I2C错误
+ *             8 路点位('#'=压线) + 岔路/普通弯判定(B±/C±) / X路口 H房间 N路口数 L主循环抖动
+ *             / V降速后速度 RX IMU字节 ERR灰度I2C错误
+ *             第9~10行 8 路原始值 (0~255, 越大越黑; 一行 4 路) —— 标定阈值看这个
  *   调参:   全部在 middle/XunJi.c 顶部 (质心阈值/极性/镜像/LR、PD 与过渡带、D 低通、
  *           降速比、丢线参数) —— 见 [7] 的顺序
  *   注:     循迹用的是开环 PWM; 想接编码器速度环, 把 Motor_SetLeft/RightPWM() 换成写
@@ -219,7 +229,9 @@
  *        越偏越往错方向打(纠正方向反)     -> middle/XunJi.c  TRACK_LR_SWAP 改 1
  *        白底数值反而比黑线大(极性反)     -> middle/XunJi.c  TRACK_DARK_IS_HIGH 改 0
  *
- *   1) 传感器自检 (车架起来, 单击 S2 先别让它跑): 先把 LCD_DEBUG 改成 1
+ *   1) 传感器自检 (不用按键: 停着也读传感器, 见下方"观察模式"): 先把 LCD_DEBUG 改成 1
+ *        阈值是自动的: 上电采 20 帧白底 -> 每路一个阈值 (白底基线+60), 见 XunJi.c 顶部;
+ *        白底上哪一路数值偏高 (最外侧常见) 会在第9~10行看出来, 偏太多就加大 ADAPT_MARGIN
  *        屏上会多出 8 个点位符号, 拿黑线依次挡每个探头, 位置一一对应
  *        ERR 必须恒为 0 (非 0 = 灰度 I2C 没通)
  *
@@ -279,7 +291,11 @@
 
 /* ---- 任务状态机总开关 ----
  * 1 = 单击 S2 后按 Mission.c 的路线表跑 (循迹+路口检测+定角转弯+步间停车 + 工作钩子)
- * 0 = 退回"纯循迹" (原来的行为, 台架调循迹/转弯参数时用) */
+ * 0 = 退回"纯循迹" (原来的行为, 台架调循迹/转弯参数时用)
+ * ★ 台架一段一段验: 不用改这里, 改 Mission.c 顶部的 MISSION_DEBUG_STEPS = N
+ *    (只跑路线表前 N 步就收工停车; 1=只验"循迹到第一个路口", 2=再验"盲走穿口", ...)
+ * ★ 观察模式: 没开始时也读灰度刷屏, 只是不驱动电机 (XunJi 的 Track_SetDrive(0)),
+ *    所以标定探头/路口/房间时不用按键, 手推车或拿黑线挡探头屏上就实时变 */
 #define MISSION_ENABLE   1
 
 #define TARGET_SPEED   40       /* 闭环目标: 编码器计数 / 20ms (先给小的, 按实测调) */
@@ -313,7 +329,7 @@ uint8_t imu_turn_done = 0;
  * 1 = 台架调试  : 额外多出 3 行 (8路点位 / X H L K / V RX ERR)
  *                   标定传感器、查路口检测、查实时性时打开; 平时关掉 */
 #ifndef LCD_DEBUG          /* 也可以用 Keil 的 Misc Controls 加 -DLCD_DEBUG=1 覆盖 */
-#define LCD_DEBUG       0
+#define LCD_DEBUG       1
 #endif
 
 /*---------------------------------------------------------------------------
@@ -466,17 +482,15 @@ int Target_A=TARGET_SPEED,Target_B=TARGET_SPEED,Target_C=TARGET_SPEED,Target_D=T
  *   屏: 128 x 160 (USE_HORIZONTAL=1), 16 号字 = 8 px 宽 -> 一行顶多 16 个字符。
  *   规则: 不足 16 字符补空格(盖掉上一帧的残字), 超过 16 字符截断(不然会印出屏外看不到)。
  *   所有 LCD 文字行都走这个函数, 别直接 LCD_ShowString。
+ *   ★ 这里只把文字写进"影子"(LCD_RowSet, 纯 RAM, 几 us 返回), 一个字节 SPI 都不发;
+ *     真正推屏在主循环的 LCD_RowFlush() 里 1ms 最多一行地做掉 —— 所以本函数不会卡主循环。
+ *     内容/颜色没变的话 LCD_RowSet 里就判掉了, 连脏行都不标 (静止画面 0 流量)。
+ *     (补空格/截断也搬进 LCD_RowSet 了; 参数 y 仍是像素, 内部 /16 换成行号)
  *-------------------------------------------------------------------------*/
 #define LCD_COLS   16
 static void lcd_row(int y, char *buf, unsigned fc)
 {
-    int n = 0;
-
-    while (buf[n] != 0 && n < LCD_COLS) n++;      /* 找结尾, 或已到 16 */
-    while (n < LCD_COLS) buf[n++] = ' ';          /* 补齐 */
-    buf[LCD_COLS] = 0;
-
-    LCD_ShowString(0, (u16)y, (const u8 *)buf, fc, BLACK, 16, 0);
+    LCD_RowSet((u8)(y / 16), buf, (u16)fc);
 }
 
 /*---------------------------------------------------------------------------
@@ -495,6 +509,8 @@ static void lcd_row(int y, char *buf, unsigned fc)
 #define R_BITS       5                   /* [仅调试] 8 路点位 */
 #define R_DIAG       6                   /* [仅调试] X/H 电平 + 主循环抖动 + 按键扫描率 */
 #define R_IO         7                   /* [仅调试] 降速后速度 + IMU 字节 + 灰度I2C错误 */
+#define R_RAW0       8                   /* [仅调试] 8 路原始值 ch0~3 (标定阈值时看这个) */
+#define R_RAW1       9                   /* [仅调试] 8 路原始值 ch4~7 */
 
 
 /*---------------------------------------------------------------------------
@@ -579,7 +595,7 @@ static void LCD_clock(int row)
  * 电机测试模式 (APP_MODE_MOTOR_TEST) 的 LCD —— 台架验证用, 8 行
  *   第1行 阶段+名字 / 第2-3行 PWM A~D / 第4-5行 实测速度 A~D /
  *   第6行 闭环目标 OPEN|CLOSED / 第7行 IMU 航向 / 第8行 授时时间
- *   只刷文字, 不做整屏刷新 (整屏刷会拖慢 20ms 环)
+ *   只写文字影子 (LCD_RowSet), 不碰 SPI —— 推屏在主循环 LCD_RowFlush() 里 1ms/行做
  *-------------------------------------------------------------------------*/
 static void LCD_status(void)
 {
@@ -625,6 +641,12 @@ static void LCD_track(void)
     char buf[24];
 
     /* 第1行: 状态 —— 停 / 丢线 / 状态机步号+子状态 / 纯循迹, 后两种都带基速 B */
+#if MISSION_ENABLE
+    /* 任务停下来报警: fail=1 找线失败(NOLINE) / fail=2 转弯序列超时或 IMU 起不来 (参见 Mission.c) */
+    if (!app_run && Mission_GetFail() == 2)     sprintf(buf, "TURN  fail  ");
+    else if (!app_run && Mission_GetFail())     sprintf(buf, "NOLINE  stop  ");
+    else
+#endif
     if (!app_run)                sprintf(buf, "STOP  press S2  ");
     else if (track_lost)         sprintf(buf, "LOST %-5d     ", track_lost);
 #if MISSION_ENABLE
@@ -646,10 +668,8 @@ static void LCD_track(void)
 
 #if LCD_DEBUG
     {   /* 以下 3 行只在 LCD_DEBUG=1 时显示: 标定传感器 / 查路口检测 / 查实时性 */
-        static uint16_t last_key = 0;
         static uint16_t loop_max = 0;
         static uint32_t last_rx  = 0;
-        uint16_t k;
         uint32_t rx = IMU_GetRxByteCount();
         unsigned rx_delta = (unsigned)(rx - last_rx);
         int      i;
@@ -657,19 +677,41 @@ static void LCD_track(void)
         last_rx = rx;
 
         for (i = 0; i < 8; i++) buf[i] = ((track_bits >> i) & 0x01) ? '.' : '#';
-        buf[8] = 0;
+        /* 后 4 格 = 岔路/普通弯 判定结果 (标定 XunJi.c 的 BRANCH_WIN_FRAMES 就看这个):
+         *   B+ = 判成岔路, 分支在右   B- = 岔路在左 (主线还在, 可以直行/可以拐)
+         *   C+ = 判成普通弯, 往右拐   C- = 普通弯往左 (主线自己拐走了 -> 车自己转)
+         *   SUP = 现在判定被关着 (转向过程 / 转完后的屏蔽窗口)   --- = 没有判定结果 */
+        if (Track_GetSuppressed()) sprintf(buf + 8, " SUP");   /* 判定被关着 (转向中/收工后的屏蔽窗口) */
+        else if (track_branch)     sprintf(buf + 8, " B%c", (track_branch_side > 0) ? '+' : '-');
+        else if (track_corner)     sprintf(buf + 8, " C%c", (track_corner_side > 0) ? '+' : '-');
+        else                       sprintf(buf + 8, " ---");
         lcd_row(LCD_Y(R_BITS), buf, GREEN);
 
         if (app_loop_ms > loop_max) loop_max = app_loop_ms;    /* 5ms 任务最坏间隔 (正常 5) */
-        k        = (uint16_t)(key_scan_cnt - last_key);        /* 1ms 按键扫描次数 (正常≈100) */
-        last_key = key_scan_cnt;
-        sprintf(buf, "X%d H%d L%2d K%3d", track_cross, track_room, loop_max, k);
-        lcd_row(LCD_Y(R_DIAG), buf, (k < 50) ? RED : GRAY);
+        /* X = 路口电平(最左或最右压线)  H = 房间黑块电平  N = 上电以来路口累计数
+         * T = 上一次转弯"看到线时"线偏阵列中心多少 (x10 路, 正 = 偏右)
+         * F = 上一次转弯靠哪一步找到线: 0 = 转到位(没找) 1 = 直进 2 = 弧A 3 = 弧B 4 = 直退 5 = 扫描 9 = 失败
+         *   ★ 标定转弯落点看 T/F: T 一直很大说明前移/转角速度要调; F 经常 >=2 说明落点已经偏了。
+         * (原来这行还有 L = 循环最坏间隔 / K = 按键扫描率, 都撤掉腾地方给转弯标定) */
+        sprintf(buf, "X%d H%d N%d T%+d F%d", track_cross, track_room, track_cross_cnt,
+                Mission_GetTurnDev(), Mission_GetTurnFound());
+        lcd_row(LCD_Y(R_DIAG), buf, track_cross ? YELLOW : GRAY);
         loop_max = 0;
 
         if (rx_delta > 999) rx_delta = 999;
         sprintf(buf, "V%3d RX%3u E%2d", track_speed, rx_delta, track_i2c_err);
         lcd_row(LCD_Y(R_IO), buf, track_i2c_err ? RED : GRAY);
+
+        /* 8 路原始值 (0~255, 越大越黑) —— 标定阈值就看这两行:
+         * 白底上哪几路本来就高 (常见是最外侧) 一眼能看出来, 阈值 = 白底值 + ADAPT_MARGIN(60)。
+         * 对照上面 R_BITS 那行: 数值明显高的那几路应该正好是 '#'。上电标定完串口会打一行基线+阈值。 */
+        sprintf(buf, "%3u %3u %3u %3u", (unsigned)track_raw[0], (unsigned)track_raw[1],
+                                        (unsigned)track_raw[2], (unsigned)track_raw[3]);
+        lcd_row(LCD_Y(R_RAW0), buf, (track_raw[0] > track_thr[0] || track_raw[3] > track_thr[3]) ? YELLOW : GRAY);
+
+        sprintf(buf, "%3u %3u %3u %3u", (unsigned)track_raw[4], (unsigned)track_raw[5],
+                                        (unsigned)track_raw[6], (unsigned)track_raw[7]);
+        lcd_row(LCD_Y(R_RAW1), buf, (track_raw[4] > track_thr[4] || track_raw[7] > track_thr[7]) ? YELLOW : GRAY);
     }
 #endif
 }
@@ -701,6 +743,22 @@ void APP_Task_5ms(void)
         return;
     }
 
+    /* 驱动闸门: 跟着 app_run 走 —— 没开始时也照读灰度刷屏, 只是不驱动电机 (台架标定用:
+     * 手推车 / 拿黑线挡探头时, 屏上 8 路点位 / X / H / N 都实时变, 车不动)。
+     * ★ 必须放在 Mission 分支【前面】: 状态机接管后也要保证 drive_en 已经打开,
+     *   否则 Mission_Run() 里 MS_TRACK -> Track_Run() -> track_output() 全被闸门挡掉,
+     *   现象就是"按 S2 后屏上 L/R 数字在跳、车不走"。(2026-10-06 修)
+     *   开关状态变了才切, 不每拍写寄存器 */
+    if (app_mode == APP_MODE_TRACK)
+    {
+        static int drive_last = -1;
+        if (drive_last != app_run)
+        {
+            Track_SetDrive(app_run ? 1 : 0);
+            drive_last = app_run;
+        }
+    }
+
 #if MISSION_ENABLE
     /* 任务状态机接管: 由它决定这一拍是 循迹 / 盲走 / 定向转 / 停车 */
     if (Mission_IsActive())
@@ -710,10 +768,7 @@ void APP_Task_5ms(void)
     }
 #endif
 
-    if ((app_mode == APP_MODE_TRACK) && app_run)
-    {
-        Track_Run();
-    }
+    if (app_mode == APP_MODE_TRACK) Track_Run();    /* 没开任务状态机 = 纯循迹 */
 }
 
 /*---------------------------------------------------------------------------
@@ -816,7 +871,7 @@ void APP_Task_20ms(void)
 }
 
 /*---------------------------------------------------------------------------
- * 100ms 任务: 测试阶段推进 + LCD 刷新
+ * 100ms 任务: 测试阶段推进 + 写 LCD 文字影子 (真正推屏在主循环 LCD_RowFlush())
  *-------------------------------------------------------------------------*/
 void APP_Task_100ms(void)
 {
@@ -921,11 +976,12 @@ static void System_Init(void)
     TimeSync_Init();                        /* 授时查询端复位: 等 1000ms 任务去读第一次 */
 
     LCD_Init();
-    /* 上电自检: 刷 3 个纯色 + 清屏, 确认 LCD 在位 */
-    LCD_Fill(0, 0, LCD_W, LCD_H, RED);   delay_ms(200);
-    LCD_Fill(0, 0, LCD_W, LCD_H, GREEN); delay_ms(200);
-    LCD_Fill(0, 0, LCD_W, LCD_H, BLUE);  delay_ms(200);
-    LCD_Fill(0, 0, LCD_W, LCD_H, BLACK);
+    /* 上电自检: 刷 3 个纯色 + 清屏, 确认 LCD 在位
+     * 用批量版: 整屏 8.2ms/次 (老 LCD_Fill 逐字节要 0.28s/次, 4 次就是 1.1s) */
+    LCD_FillFast(0, 0, LCD_W, LCD_H, RED);   delay_ms(200);
+    LCD_FillFast(0, 0, LCD_W, LCD_H, GREEN); delay_ms(200);
+    LCD_FillFast(0, 0, LCD_W, LCD_H, BLUE);  delay_ms(200);
+    LCD_FillFast(0, 0, LCD_W, LCD_H, BLACK);
     LCD_DrawRectangle(0, 0, LCD_W - 1, LCD_H - 1, WHITE);
 
     if (app_mode == APP_MODE_TRACK)
@@ -956,6 +1012,7 @@ int main(void)
     while (1)
     {
         Scheduler_Run();
+        LCD_RowFlush();     /* 刷 1 行脏行 (<=0.9ms): 100ms 任务只写影子, 推屏在这里分摊 */
     }
 }
 
@@ -981,6 +1038,10 @@ void Mission_OnWork(int room)
 
 void Mission_OnDone(void)
 {
-    printf("MDONE all steps finished\r\n");
+    /* 收工即停: 跑完最后一步后不要再落回"纯循迹"自己往前跑 (MISSION_DEBUG_STEPS 限流时同理) */
+    app_run = 0;
+    Motor_Stop();
+    PWMA = PWMB = PWMC = PWMD = 0;
+    printf("MDONE done, stopped. t=%s\r\n", TimeSync_GetStr());
 }
 #endif
