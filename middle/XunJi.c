@@ -442,13 +442,22 @@ void Track_Run(void)
 
                 if (br_win > 0)                                 /* 正在判定窗口里 */
                 {
+                    /* 触发那侧的 3 路是否已经清空 (bit=1 白): 清空了才可能是"主线回来了"。
+                     * 右侧窗口看 bit5~7, 左侧窗口看 bit0~2 (与 [B] 触发用的是同 3 路)。 */
+                    int edge_clear = (br_side > 0) ? (((bits >> 5) & 0x07) == 0x07)
+                                                   : ((bits & 0x07) == 0x07);
+
                     if (nb > BRANCH_MAX_BLACK)                  /* 大面积黑: 是房间/主线横条, 撤销判定 */
                     {
                         br_win = 0; br_side = 0;
                     }
-                    else if (!center_white && (nb <= BRANCH_LINE_MAX_BLACK))
-                                                                /* 主线回到阵列正中且仍是【细线】-> 岔路
-                                                                 * (排除直角弯拐角那条宽臂被当成主线) */
+                    else if ((!BRANCH_REQ_EDGE_CLEAR || edge_clear) &&
+                         !center_white && (nb <= BRANCH_LINE_MAX_BLACK))
+                                                                /* 主线回到阵列正中 + 整体细线 + 【触发那侧已经清空】
+                                                                 * -> 岔路。
+                                                                 * (边侧清空这条是 2026-10-07 加的: 见 XunJi.h 的
+                                                                 *  BRANCH_REQ_EDGE_CLEAR —— 否则三路宽贴端的直角弯会被
+                                                                 *  当场判成岔路, 因为它和中心掩码重叠) */
                     {
                         if (br_side != 0)
                         {
