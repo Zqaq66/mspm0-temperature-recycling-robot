@@ -241,9 +241,9 @@ static const MissionStep route[] =
  *         28 = +J7~CHG5S (岔路口 + 充电区 + 停5s) | 31 = +U180~END (整表)
  *        每验通一段把 N 加 1; 也可以用 Keil Misc Controls 加 -DMISSION_DEBUG_STEPS=2 */
 #ifndef MISSION_DEBUG_STEPS
-#define MISSION_DEBUG_STEPS   7      /* 当前(新表)行数: 0 = 整表, N = 只跑前 N 行
-                                      *   7 = 跑到 M90_1: 进完 1 号房间并回到主路
-                                      * 每验通一段把 N 加 1 */
+#define MISSION_DEBUG_STEPS   0      /* ★ 0 = 跑【整张表】(31 行, 一路到停车场收工)
+                                      *   N>0 = 只跑前 N 行 (一段段验的时候用, 见上面那张对照表)
+                                      *   还想分段验就把 0 改回 7/13/19/23/26/28 之一 */
 #endif
 #define ROUTE_N   (((MISSION_DEBUG_STEPS) > 0 && (MISSION_DEBUG_STEPS) < ROUTE_N_ALL) \
                    ? (MISSION_DEBUG_STEPS) : ROUTE_N_ALL)
