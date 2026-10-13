@@ -138,6 +138,7 @@ int     track_nblack    = 0;
 int     track_cross     = 0;
 int     track_cross_side= 0;
 int     track_room      = 0;
+int     track_branch    = 0;
 int     track_cross_cnt = 0;
 
 /* ---- 普通弯 (见 XunJi.h): 电平给屏看 + 边沿事件给状态机 ---- */
@@ -163,6 +164,7 @@ static uint8_t bits_h1 = 0xFF, bits_h2 = 0xFF;   /* 3 帧中值的前两拍 */
 /* 检测内部: 去抖计数 / 本帧已报标志 / 待取边沿事件 (只在 Track_Run 里更新) */
 static uint8_t det_cross_cnt = 0, det_cross_rep = 0, det_cross_ev = 0;
 static uint8_t det_room_cnt  = 0, det_room_rep  = 0, det_room_ev  = 0;
+static uint8_t det_br_cnt    = 0, det_br_rep    = 0, det_br_ev    = 0;
 
 /* 岔路/普通弯 判定状态 (2026-10-06) */
 /* 事件层状态: 普通弯判定 + 判定开关 */
@@ -345,7 +347,8 @@ void Track_Run(void)
         last_time  = Get_Time();
         det_cross_cnt = det_cross_rep = det_cross_ev = 0;
         det_room_cnt  = det_room_rep  = det_room_ev  = 0;
-        track_cross = track_room = 0;
+        det_br_cnt    = det_br_rep    = det_br_ev    = 0;
+        track_cross = track_room = track_branch = 0;
         track_nblack = 0;
         track_cross_cnt = 0;
         cn_win = 0; cn_side = 0; cn_hold = 0;      /* 普通弯判定从头开始 */
@@ -563,6 +566,30 @@ void Track_Run(void)
             track_room = (det_room_cnt >= POINT_CONFIRM_FRAMES) ? 1 : 0;
         }
 
+        /* ---- EV_BRANCH = 岔路口 (旁边岔出一条支线, 主线还在) ----
+         * ★ 这是"大面积黑"抓不到的另一类口: 车【沿着主线走】, 支线垂直于行进方向,
+         *   只压住阵列【端部】1 路左右, 主线还占着中心那几路 -> 拼不出 nb>=6。
+         *   (从正面撞上横杠那种口才是"大面积黑", 见上面那段。)
+         *   判据: 最左或最右压线 + 中心那两路还有线 + 不是大面积黑, 连续几帧。 */
+        {
+            int e_l = !((bits >> 0) & 1);
+            int e_r = !((bits >> 7) & 1);
+            int c_ok = (!((bits >> 3) & 1)) || (!((bits >> 4) & 1));   /* 中心还有线 = 主线还在 */
+
+            if ((e_l || e_r) && c_ok && (nb < ROOM_MIN_BLACK))
+            {
+                if (det_br_cnt < 250) det_br_cnt++;
+                if ((det_br_cnt >= BRANCH_CONFIRM_FRAMES) && !det_br_rep)
+                {
+                    det_br_rep = 1;
+                    det_br_ev  = 1;
+                }
+            }
+            else { det_br_cnt = 0; det_br_rep = 0; }
+
+            track_branch = (det_br_cnt >= BRANCH_CONFIRM_FRAMES) ? 1 : 0;
+        }
+
         /* ------ 2c. 普通弯 判定 (EV_CORNER) ------
          * ★ 必须"先开窗、再数帧", 不能当拍同时判 —— "外侧连续 3 路"(bit5~7 或 bit0~2)
          *   和 "中心那几路"(bit2~5) 本身就有重叠位 (bit2/bit5), 同拍判定永远不成立。
@@ -759,6 +786,13 @@ int Track_TakeRoom(void)
     return r;
 }
 
+int Track_TakeBranch(void)
+{
+    int r = (int)det_br_ev;
+    det_br_ev = 0;
+    return r;
+}
+
 /*---------------------------------------------------------------------------
  * 普通弯 的边沿式读取: 事件成立时侧向在 track_corner_side 里 (+1 右 / -1 左)
  *---------------------------------------------------------------------------*/
@@ -852,6 +886,7 @@ void Track_SetDrive(int on)
 static void track_det_clear(void)
 {
     cn_win = 0; cn_side = 0; cn_ev = 0;
+    det_br_ev = 0; track_branch = 0;
     track_corner = 0;
 }
 

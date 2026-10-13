@@ -363,6 +363,7 @@ static void ms_next_step(uint32_t now)
     /* 停车期间(车没动)攒下的事件丢掉, 否则下一步一进 RUN 就立刻误触发 */
     (void)Track_TakeCross();
     (void)Track_TakeRoom();
+    (void)Track_TakeBranch();
     (void)Track_TakeCorner();
 
     ms_sync_now(now);
@@ -831,7 +832,7 @@ void Mission_Run(void)
             if (ms_cross_phase == 0)                      /* ① 循迹接近 (途中遇到普通弯自己转) */
             {
                 ms_do_track();
-                if (Track_TakeRoom())                     /* 大面积黑 = 到口子 (丁字口横杠/停车线) */
+                if (Track_TakeRoom() || Track_TakeBranch())  /* 大面积黑 / 旁边岔出支线 = 到口子 */
                 {
                     if (s->arg == 0)                      /* arg=0: 直行穿过 */
                     {

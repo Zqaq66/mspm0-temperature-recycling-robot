@@ -479,6 +479,7 @@ static void LCD_track(void)
          *   SUP = 判定被关着 (转向/找线中)      --- = 什么都没发生 */
         if (Track_GetSuppressed()) sprintf(buf + 8, " SUP");
         else if (track_room)       sprintf(buf + 8, " Pnt");
+        else if (track_branch)     sprintf(buf + 8, " Br%c", (track_cross_side > 0) ? '+' : '-');
         else if (track_corner)     sprintf(buf + 8, " C%c", (track_corner_side > 0) ? '+' : '-');
         else                       sprintf(buf + 8, " ---");
         lcd_row(LCD_Y(R_BITS), buf, GREEN);

@@ -65,6 +65,7 @@ void Track_StepSpeed(int dir);      /* dir>0 加速一档, dir<0 减速一档 */
 #define ROOM_MIN_BLACK         6      /* >= 这么多路压线 = 房间/工作区黑块 (8=全黑) */
 #define POINT_CONFIRM_FRAMES   4      /* 大面积黑要连续这么多帧才算 EV_BLACK (去抖, 5ms/帧) */
 #define POINT_MIN_RUN          5      /* 且最长连续压线 >= 它: 停车线/横杠是整片黑, 污渍多半断续 */
+#define BRANCH_CONFIRM_FRAMES  3      /* EV_BRANCH (旁边岔出支线) 连续这么多帧才算 (去抖) */
 #define TRACK_STOP_PWM         0      /* 停车时的 PWM (0 + 短路制动) */
 
 /* ---- 事件层 (2026-10-13 简化) ---------------------------------------------
@@ -93,12 +94,14 @@ extern int  track_nblack;      /* 本帧压线路数 0~8 */
 extern int  track_cross;       /* 电平: 1 = 现在压在路口上 (只给屏看) */
 extern int  track_cross_side;  /* -1=只在左边, +1=只在右边, 0=两边都有 */
 extern int  track_room;        /* 电平: 1 = 现在压在大面积黑上 (已去抖) */
+extern int  track_branch;      /* 电平: 1 = 旁边岔出一条支线 (最外侧压线 + 中心有线) */
 extern int  track_cross_cnt;   /* 上电以来"最左/最右压线"的次数 (调试/屏显) */
 extern int  track_corner;      /* 电平: 1 = 现在线从侧面离开了 (普通弯) */
 extern int  track_corner_side; /* 普通弯往哪边: +1 右 / -1 左 */
 
 int  Track_TakeCross(void);    /* 边沿: 最左/最右压线 (只给屏/调试用) */
 int  Track_TakeRoom(void);     /* 边沿: 到大面积黑 -> 1 ★状态机的主事件 (到口子/停车线) */
+int  Track_TakeBranch(void);   /* 边沿: 旁边岔出支线 -> 1 (沿主线走、支线在侧面的那种口) */
 int  Track_TakeCorner(void);   /* 边沿: 确认普通弯 -> 1 */
 void Track_Stop(void);         /* 停车: 左右 PWM 0 + 短路制动 (状态机用) */
 void Track_SetDrive(int on);   /* 0 = 观察模式: 照读传感器/刷屏, 但不驱动电机 (台架标定用) */
