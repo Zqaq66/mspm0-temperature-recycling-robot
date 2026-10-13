@@ -287,6 +287,9 @@
 #include "imu_uart_driver.h"/* IMU: YbIMU UART 驱动 (UART1 PA8=TX/PA9=RX) */
 #include "ImuTurn.h"        /* IMU 转向/保向: 转到指定角度 / 保持指定角度 */
 #include "Mission.h"        /* 任务状态机: 循迹->路口->转向->工作->恢复循迹 (路线表在 Mission.c) */
+#include "MLX90614.h"       /* 红外测温 MLX90614 (I2C0 0x5A, 与灰度共用总线) */
+#include "TW.h"             /* 语音播报: Voice_0/Voice_1 -> UART0 */
+#include "UART.h"           /* UART_Init / UART_send_char -> UART0 (语音) */
 #include "TimeSync.h"        /* I2C 授时查询端: ESP32-S2(0x42) -> 本地走时 (接线/调参见 TimeSync.h) */
 
 /* ---- 任务状态机总开关 ----
@@ -297,6 +300,24 @@
  * ★ 观察模式: 没开始时也读灰度刷屏, 只是不驱动电机 (XunJi 的 Track_SetDrive(0)),
  *    所以标定探头/路口/房间时不用按键, 手推车或拿黑线挡探头屏上就实时变 */
 #define MISSION_ENABLE   1
+
+/* ---- 题目功能: 房间测温环节 (语音 / 测温 / 电量 / 屏显结果区 / LORA 上报) ----
+ * 1 = 开 (默认): Mission_OnWork() 里做完整流程; 屏第 6~10 行显示 [电量 + 4 个房间结果]
+ * 0 = 关: 屏第 6~10 行还给 LCD_DEBUG 的标定/诊断行 (台架调循迹/路口时用)
+ * ★ WORK_FEATURES 和 LCD_DEBUG 抢屏第 6~10 行 -> 只能二选一 */
+#ifndef WORK_FEATURES
+#define WORK_FEATURES   1
+#endif
+
+/* 电池电压: ADC0/PA27, 板上 1/4 分压 -> Vbat = Vpin * BAT_DIV_RATIO
+ * 电量% = (Vbat - BAT_EMPTY_V) / (BAT_FULL_V - BAT_EMPTY_V) * 100 (题目给的参考公式) */
+#define BAT_DIV_RATIO   4.0f
+#define BAT_EMPTY_V     10.5f
+#define BAT_FULL_V      12.6f
+
+/* 测温: TEMP_SAMPLES 次取中位, 两次间隔 TEMP_GAP_MS (MLX90614 内部约 10Hz 刷新) */
+#define TEMP_SAMPLES    4
+#define TEMP_GAP_MS     25
 
 #define TARGET_SPEED   40       /* 闭环目标: 编码器计数 / 20ms (先给小的, 按实测调) */
 
@@ -591,6 +612,147 @@ static void LCD_clock(int row)
 }
 
 
+/*===========================================================================
+ * 题目功能: 房间测温环节 (MS_WORK 步里由 Mission_OnWork() 调)
+ *   流程: 语音提示 -> 测温 -> 读电量 -> 记结果(屏+时间戳) -> LORA 上报 -> 语音完成
+ *   结果存 g_room[]: 中途不清, 下一次任务开始(Results_Clear)才清 (题目要求)
+ *   ★ 本工程用 microlib, printf/sprintf 不支持 %f -> 浮点一律走 fmt_temp/fmt_volt 整数化
+ *===========================================================================*/
+#if WORK_FEATURES
+typedef struct
+{
+    uint8_t valid;          /* 1 = 这个房间已经测过 */
+    uint8_t time_ok;        /* 1 = 测量时刻有效 (I2C 授时已同步) */
+    float   temp_c;         /* 体温 ℃ */
+    float   bat_v;          /* 测量时的电池电压 V */
+    uint8_t bat_pct;        /* 测量时的电量 0~100 */
+    uint8_t hh, mm, ss;     /* 测量时刻 时:分:秒 */
+} RoomResult;
+
+static RoomResult g_room[5];          /* 只用 1..4 (下标 = 房间号) */
+static float      g_bat_v   = 0.0f;   /* 最近一次读到的电池电压 (结果区第 1 行显示) */
+static uint8_t    g_bat_pct = 0;
+static uint8_t    g_task_done = 0;    /* 1 = 整表跑完 (屏第 1 行提示"任务完成") */
+
+/* 清空结果 —— 在下一次任务开始时调 (满足"数据中途不得清除") */
+static void Results_Clear(void)
+{
+    int i;
+    for (i = 0; i < 5; i++) { g_room[i].valid = 0; g_room[i].time_ok = 0; }
+    g_bat_v     = 0.0f;
+    g_bat_pct   = 0;
+    g_task_done = 0;
+}
+
+/* 读一次电池电压: ADC0/PA27 (SysConfig 已配: 12bit / 重复采样 / 软件触发)
+ *   Vpin = raw/4095*3.3V;  板上 1/4 分压 -> Vbat = Vpin * BAT_DIV_RATIO */
+static float Bat_ReadVoltage(void)
+{
+    uint16_t raw;
+    uint32_t t0;
+
+    DL_ADC12_startConversion(ADC_VOLTAGE_INST);
+    t0 = Get_Time();
+    while (!(DL_ADC12_getRawInterruptStatus(ADC_VOLTAGE_INST,
+                                            DL_ADC12_INTERRUPT_MEM0_RESULT_LOADED)))
+    {
+        if ((Get_Time() - t0) > 20u) break;      /* 兜底: 硬件没接也别把 5ms 任务卡死 */
+    }
+    DL_ADC12_clearInterruptStatus(ADC_VOLTAGE_INST,
+                                  DL_ADC12_INTERRUPT_MEM0_RESULT_LOADED);
+
+    raw = DL_ADC12_getMemResult(ADC_VOLTAGE_INST, ADC_VOLTAGE_ADCMEM_ADC_CH0);
+    return ((float)raw * 3.3f / 4095.0f) * BAT_DIV_RATIO;
+}
+
+/* 连续读 4 次求平均 (去抖) */
+static float Bat_ReadAvg(void)
+{
+    float sum = 0.0f;
+    int   k;
+    for (k = 0; k < 4; k++) sum += Bat_ReadVoltage();
+    return sum * 0.25f;
+}
+
+static uint8_t Bat_ToPercent(float v)
+{
+    float pct = (v - BAT_EMPTY_V) / (BAT_FULL_V - BAT_EMPTY_V) * 100.0f;
+    if (pct < 0.0f)   pct = 0.0f;
+    if (pct > 100.0f) pct = 100.0f;
+    return (uint8_t)(pct + 0.5f);
+}
+
+/* 读体温: MLX90614 物体温度 (寄存器 0x07), 采 TEMP_SAMPLES 次取中位数
+ *   驱动读失败返回 0.0f (见 MLX90614.c), 这里把 0.0 和超范围值都当失败丢掉 */
+static float Temp_ReadBody(uint8_t *ok)
+{
+    float s[TEMP_SAMPLES];
+    int   n = 0, i, j;
+
+    for (i = 0; i < TEMP_SAMPLES; i++)
+    {
+        float t = MLX90614_Read(0x5A, 0x07);
+        if ((t != 0.0f) && (t > -10.0f) && (t < 80.0f)) s[n++] = t;
+        delay_ms(TEMP_GAP_MS);
+    }
+    *ok = (n > 0) ? 1 : 0;
+    if (n == 0) return 0.0f;
+
+    for (i = 1; i < n; i++)                      /* 插入排序 (n <= TEMP_SAMPLES) */
+    {
+        float key = s[i];
+        for (j = i - 1; (j >= 0) && (s[j] > key); j--) s[j + 1] = s[j];
+        s[j + 1] = key;
+    }
+    return (n & 1) ? s[n / 2] : (s[n / 2 - 1] + s[n / 2]) * 0.5f;
+}
+
+/* 浮点 -> 整数格式化 (microlib 无 %f): 温度 "36.5" / 电压 "11.85V" */
+static void fmt_temp(char *out, float t)
+{
+    int t10 = (int)(t * 10.0f + ((t >= 0.0f) ? 0.5f : -0.5f));
+    if (t10 < 0) sprintf(out, "-%d.%d", (-t10) / 10, (-t10) % 10);
+    else         sprintf(out, "%d.%d", t10 / 10, t10 % 10);
+}
+static void fmt_volt(char *out, float v)
+{
+    int mv = (int)(v * 100.0f + 0.5f);
+    if (mv < 0) mv = 0;
+    sprintf(out, "%d.%02dV", mv / 100, mv % 100);
+}
+
+/* 房间结果区: 第 6 行 = 电量; 第 7~10 行 = 4 个房间 (题目要求: 中途不清) */
+static void LCD_results(void)
+{
+    char buf[24];
+    char tmp[10];
+    int  r;
+
+    if (g_bat_v > 1.0f) { fmt_volt(tmp, g_bat_v); sprintf(buf, "BAT %s %d%%", tmp, (int)g_bat_pct); }
+    else                sprintf(buf, "BAT  --.--V ---");
+    lcd_row(LCD_Y(5), buf, (g_bat_pct && (g_bat_pct < 20)) ? RED : GREEN);
+
+    for (r = 1; r <= 4; r++)
+    {
+        if (g_room[r].valid)
+        {
+            fmt_temp(tmp, g_room[r].temp_c);
+            if (g_room[r].time_ok)
+                sprintf(buf, "%d %sC %02d:%02d:%02d", r, tmp,
+                        (int)g_room[r].hh, (int)g_room[r].mm, (int)g_room[r].ss);
+            else
+                sprintf(buf, "%d %sC --:--:--", r, tmp);
+            lcd_row(LCD_Y(5 + r), buf, YELLOW);
+        }
+        else
+        {
+            sprintf(buf, "%d --.-C --:--:--", r);
+            lcd_row(LCD_Y(5 + r), buf, GRAY);
+        }
+    }
+}
+#endif /* WORK_FEATURES */
+
 /*---------------------------------------------------------------------------
  * 电机测试模式 (APP_MODE_MOTOR_TEST) 的 LCD —— 台架验证用, 8 行
  *   第1行 阶段+名字 / 第2-3行 PWM A~D / 第4-5行 实测速度 A~D /
@@ -645,6 +807,9 @@ static void LCD_track(void)
     /* 任务停下来报警: fail=1 找线失败(NOLINE) / fail=2 转弯序列超时或 IMU 起不来 (参见 Mission.c) */
     if (!app_run && Mission_GetFail() == 2)     sprintf(buf, "TURN  fail  ");
     else if (!app_run && Mission_GetFail())     sprintf(buf, "NOLINE  stop  ");
+#if WORK_FEATURES
+    else if (g_task_done)                       sprintf(buf, "TASK  DONE  ");
+#endif
     else
 #endif
     if (!app_run)                sprintf(buf, "STOP  press S2  ");
@@ -666,7 +831,11 @@ static void LCD_track(void)
     LCD_imu(R_IMU);                          /* 第4行: 航向 (转向中 + 剩余角) */
     LCD_clock(R_TIME);                       /* 第5行: 授时时间 (未同步不显示) */
 
-#if LCD_DEBUG
+#if WORK_FEATURES
+    LCD_results();                           /* 第 6~10 行: 电量 + 4 个房间结果 (题目要求) */
+#endif
+
+#if LCD_DEBUG && !WORK_FEATURES
     {   /* 以下 3 行只在 LCD_DEBUG=1 时显示: 标定传感器 / 查路口检测 / 查实时性 */
         static uint16_t loop_max = 0;
         static uint32_t last_rx  = 0;
@@ -799,6 +968,9 @@ void APP_Task_10ms(void)
             Motor_Enable();                                  /* STBY 使能 */
 #if MISSION_ENABLE
             if (app_mode == APP_MODE_TRACK) Mission_Start(); /* 按路线表开跑 */
+#endif
+#if WORK_FEATURES
+            Results_Clear();                                 /* 新任务开始: 清上一次的房间结果 */
 #endif
         }
         else
@@ -970,6 +1142,11 @@ static void System_Init(void)
     ImuTurn_Init();                         /* IMU 转向/保向层复位 */
     Mission_Init();                         /* 任务状态机复位 (路线表在 middle/Mission.c) */
 
+#if WORK_FEATURES
+    TW_Init();                              /* 语音模块控制脚 (PB17/PB18) 置 idle */
+    UART_Init();                            /* UART0: 语音模块 (UART_send_char -> 'E'/'F') */
+#endif
+
     Timer_Init();                           /* 1ms 时基: 清标志 + 开中断 */
     DL_TimerG_startCounter(TIMER_0_INST);   /* 启动 1ms 计数 -> 调度器时基 */
 
@@ -987,6 +1164,10 @@ static void System_Init(void)
     if (app_mode == APP_MODE_TRACK)
     {
         Track_Init();                       /* 循迹 PID 初始化 */
+#if WORK_FEATURES
+        g_bat_v   = Bat_ReadAvg();          /* 上电先读一次电量 (结果区电量行) */
+        g_bat_pct = Bat_ToPercent(g_bat_v);
+#endif
         printf("\r\n==== TRACK mode: AuroraT8 (I2C0 PA0/PA1), 5ms loop ====\r\n");
         printf("KEY S2/PB21: click = start/stop, long press = speed up\r\n");
         printf("TIME: I2C1 PA30(SDA)/PA29(SCL) -> ESP32-S2 @0x42 400kHz, calib %us\r\n",
@@ -1031,9 +1212,48 @@ void Mission_OnStepEnter(int step)
 
 void Mission_OnWork(int room)
 {
-    /* TODO(以后): 语音播报 -> MLX90614 测温 -> LCD 刷新 -> LORA 上传 */
-    /* 时间戳来自 I2C 授时模块 (未同步时是 0000-00-00 00:00:00, 用 TimeSync_Status() 判断) */
-    printf("MWORK room=%d t=%s (TODO: voice/temp/LCD/LORA)\r\n", room, TimeSync_GetStr());
+    /* 到达房间/工作区 (车已停稳): 语音 -> 测温 -> 电量 -> 记结果(屏+时间戳) -> LORA 上报 -> 语音
+     * ★ 在 5ms 任务里被调, 但此时车是停着的: 阻塞的 I2C/ADC/串口都在 MS_WORK 的窗口内 */
+#if WORK_FEATURES
+    uint8_t tok = 0;
+    float   temp, bv;
+    uint8_t pct;
+    char    ts[10], vs[10];
+    TimeSync_DateTime dt;
+
+    Voice_0(1);                                     /* 语音: 提示"开始测量" */
+    temp = Temp_ReadBody(&tok);                     /* 体温: 多次采样取中位 */
+    bv   = Bat_ReadAvg();                           /* 电池电压/电量 (顺手刷新) */
+    pct  = Bat_ToPercent(bv);
+    g_bat_v   = bv;
+    g_bat_pct = pct;
+
+    if ((room >= 1) && (room <= 4))                 /* 记录到结果区 (中途不清) */
+    {
+        g_room[room].valid   = 1;
+        g_room[room].temp_c  = temp;
+        g_room[room].bat_v   = bv;
+        g_room[room].bat_pct = pct;
+        g_room[room].time_ok = (TimeSync_Get(&dt) == 1) ? 1 : 0;
+        if (g_room[room].time_ok)
+        {
+            g_room[room].hh = dt.hour;
+            g_room[room].mm = dt.min;
+            g_room[room].ss = dt.sec;
+        }
+    }
+
+    /* LORA 上报 (printf 出口 = LORA 口 UART3/PB2, 9600); 浮点用整数格式化 */
+    fmt_temp(ts, temp);
+    fmt_volt(vs, bv);
+    printf("TEMP,room=%d,temp=%sC,ok=%d,bat=%s,%d%%,time=%s,utc=%u\r\n",
+           room, tok ? ts : "--.-", (int)tok, vs, (int)pct,
+           TimeSync_GetStr(), (unsigned)TimeSync_GetEpochUtc());
+
+    Voice_1(1);                                     /* 语音: 提示"测量完成" */
+#else
+    printf("MWORK room=%d t=%s\r\n", room, TimeSync_GetStr());
+#endif
 }
 
 void Mission_OnDone(void)
@@ -1042,6 +1262,16 @@ void Mission_OnDone(void)
     app_run = 0;
     Motor_Stop();
     PWMA = PWMB = PWMC = PWMD = 0;
+#if WORK_FEATURES
+    g_task_done = 1;                                /* 屏第 1 行提示"任务完成" (结果不清) */
+    {
+        char vs[10];
+        fmt_volt(vs, g_bat_v);
+        printf("DONE,task=complete,rooms=4,bat=%s,%d%%,time=%s,utc=%u\r\n",
+               vs, (int)g_bat_pct, TimeSync_GetStr(), (unsigned)TimeSync_GetEpochUtc());
+    }
+#else
     printf("MDONE done, stopped. t=%s\r\n", TimeSync_GetStr());
+#endif
 }
 #endif

@@ -31,8 +31,8 @@ void LOAR_USART_Init(void)
 ******************************************************************/
 void LOAR_USART_Send_Bit(unsigned char ch)
 {
-	DL_UART_Main_transmitData(UART1,ch);    
-    while(DL_UART_isBusy(UART1)==true);
+	DL_UART_Main_transmitData(LORA_INST,ch);    
+    while(DL_UART_isBusy(LORA_INST)==true);
 }  
 
 
