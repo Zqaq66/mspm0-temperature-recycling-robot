@@ -28,7 +28,17 @@
 #include "stdio.h"
 
 #define MS_BLIND_SPEED   250    /* MS_BLIND 没给 PWM 时的直行速度 */
-#define MS_BLIND_THRU_MS 600    /* 岔路口"不转"时盲走直行穿过去口的时长 (按车速/口宽标定) */
+
+/* ---- MS_CROSS arg=0 "直行穿过" 的走法 ----
+ * 盲走直行, 直到线重新回到阵列中间, 或到时限 —— 不用按车速标定固定毫秒数。
+ * MS_THRU_MIN_MS: 至少盲走这么久 (先把口子的横杠甩到身后); MAX: 兜底上限。 */
+#define MS_THRU_MIN_MS     150  /* 最短盲走 (ms) */
+#define MS_THRU_MAX_MS    1200  /* 最长盲走 (ms), 到了就交回循迹 (防止一直找不到线) */
+#define MS_THRU_MAX_BLACK    3  /* "线回来了"的判据: 压线路数 <= 它, 且都在中心那几路 */
+
+/* ---- 起步保护 ---- 车就停在停车线(短横杠)上, 一上电 8 路全黑 -> 会被当成"到口子"。
+ * 单击开始后先屏蔽判定这么久, 让车先离开停车线, 再开始认事件。 */
+#define MS_START_GUARD_MS 1200
 
 /* ---- 转弯 (2026-10-06) ----------------------------------------------------
  * MS_ADV_MS: 转弯前先盲走直行这么久, 再原地转。
@@ -90,7 +100,7 @@
  *       掉头前加那 250ms 前移会把车带出工作位置 -> 掉头就做不成了 (2026-10-07 上板实测)。
  *       几何上也不需要: 绕几何中心转 180 度, 传感器从"车前 L"变到"车后 L",
  *       线是顺着航向走的, 前后挪 2L 不影响它压不压线。
- *   (b) 90 度 (MS_TURN_MEMO, 从房间支线回上一个路口): 【走转弯序列】——
+ *   (b) 90 度 (MS_TURN, 从支线回主路): 【走转弯序列】——
  *       先盲走 MS_TURN_ADV_MS 再原地转 90, 转完再看一眼线 (找线兜底)。
  *       这个 T 字口和 180 掉头一样是"大面积黑", 但 90 度不补这段, 转完传感器就落在线外。
  * ----------------------------------------------------------------------- */
@@ -120,33 +130,30 @@
  * 3) 退出条件怎么选 (决定"这段路什么算走完"):
  *      MS_EX_ROOM   大面积黑 (>=6 路压线) = 房间口 / 工作区 / 充电区
  *      MS_EX_JUNC   判据同 MS_EX_ROOM, 只是名字贴切: 从支线出来撞上主线那个 T 字口
- *      MS_EX_CROSS  最左或最右压线 = 岔路口 (MS_CROSS 步用)
+ *      MS_EX_CROSS  最左/最右压线 (现在只给屏看; 排路线用 MS_EX_ROOM / MS_EX_JUNC)
  *      MS_EX_TIME   计时到 exit_arg 毫秒
  *      MS_EX_TURN   转向做完 (MS_TURN 步用)
  *      MS_EX_LINE   指定的那几路重新压线 (exit_arg = 掩码, bit=0 表示压线; 例 0xC0 = bit6/7)
  *      MS_EX_NONE   自己不退, 只能靠 timeout_ms 兜
  *
- * 4) 三种"拐弯"分别怎么写 (★ 最容易填错的地方):
- *      普通直角弯          : 【不写表!】车在 MS_TRACK 步里自己判出来, 自己"前移 250ms + 转 90"。
- *      岔路口              : 写一行 MS_CROSS ——
- *                              arg = 1 : 要拐进支线 (往左还是往右由传感器判, 表里不写方向)
- *                              arg = 0 : 直行穿过这个口 (盲走 MS_BLIND_THRU_MS 毫秒)
- *                            ★ 每个岔路口单独占一行, 走完这一步才继续下一步。
- *      180 度掉头          : 写一行 { MS_TURN, +180, MS_EX_TURN, ... } -> 【原地直接转, 不前移】。
- *      从支线回主路的 T 字口: 写一行 { MS_TURN, MS_TURN_MEMO, MS_EX_TURN, ... } ->
- *                            盲走 MS_TURN_ADV_MS(250ms) + 原地转 90, 方向 = 进支线时那个方向。
- *                            ★ 这两个口在传感器眼里都是"大面积黑 T 字口" (判据一样),
- *                              区别只在转的角度: 90 度要前移, 180 度不前移 (见 turn_seq_start)。
+ * 4) 四种"走法"分别怎么写 (★ 最容易填错的地方):
+ *      普通直角弯      : 【不写表!】车在 MS_TRACK / MS_CROSS 的循迹段里自己"前移+转 90"。
+ *      丁字口 / 停车口 : 写一行 MS_CROSS, 【方向写死】:
+ *                          arg =  0 : 直行穿过 (盲走到线回阵列正中)
+ *                          arg = +1 : 右拐 90        arg = -1 : 左拐 90
+ *                        ★ 正撞丁字口时左右两支一模一样, 传感器判不准 -> 必须写死。
+ *                        ★ 每个口单独占一行; 走完这一步才继续下一步。
+ *      180 度掉头      : 写一行 { MS_TURN, +180, MS_EX_TURN, ... } -> 原地直接转, 不前移。
+ *      90 度定角转     : { MS_TURN, ±90, ... } -> 统一转弯序列 (前移+转+找线)。
  *
- * 5) 一个房间 = 连着的 5 行; 2/3/4 号房间照抄房间 1 这组, 只改 room 号和名字:
+ * 5) 一个房间 = 连着的 4 行; 2/3/4 号房间照抄房间 1 这组, 只改 room 号和名字:
  *      行1 MS_TRACK  MS_EX_ROOM   循迹到房间口 (大面积黑)
  *      行2 MS_WORK   MS_EX_TIME   停车做事: room = N, exit_arg = 1500ms (测温/LCD/LORA 挂这里)
  *      行3 MS_TURN   +180         原地掉头 (测完原样转回来)
- *      行4 MS_TRACK  MS_EX_JUNC   沿支线循迹回上一个路口 (撞上主线 = 大面积黑)
- *      行5 MS_TURN   MS_TURN_MEMO 转回主路方向 (方向和进支线时同侧)
- *      ★ 房间口和"回主路撞到的 T 字口"在传感器眼里一模一样 (都是大面积黑), 全靠它们在表里的
- *        【位置】区分 -> 这 5 行的顺序不能乱 (行1 是房间口, 行4 才是路口的 T 字口)。
- *      ★ 几个房间共用同一个"上一个路口"时, 每个房间前面那一行 MS_CROSS 都要按地图重写一遍。
+ *      行4 MS_CROSS  -1           退回上一个丁字口, 左拐 90 回主路
+ *      ★ 房间口和"回主路撞到的丁字口"在传感器眼里一模一样 (都是大面积黑), 全靠它们在表里的
+ *        【位置】区分 -> 这 4 行的顺序不能乱 (行1 是房间口, 行4 才回到路口)。
+ *      ★ 表必须"穷尽": 每一个会产生大面积黑的地方都要有一行 —— 表里没写的黑, 车会直接开过去。
  *
  * 6) 每行的两个时间 (最容易混):
  *      stop_ms    = 这一步【做完之后】在原地停多久再进下一步 (属于本行, 不是下一行)
@@ -163,63 +170,54 @@ static const MissionStep route[] =
 {
 /* 动作             arg       退出条件      条件参数   停车ms 超时ms 房间  名字
  * ---------------------------------------------------------------------------
- * ★ 转弯方向一律不写死: MS_CROSS 的 arg 只说"要不要转"(1转/0直行穿过), 往哪边转
- *   由传感器自己判 (XunJi 的岔路判定 -> track_branch_side)。
- *   MS_TURN 只用在必须指定方向的地方: 180 掉头 / 从房间支线回主路 (MS_TURN_MEMO)。
- *   普通弯不在表里: 主线自己拐走的弯, 车在 MS_TRACK 步里自动"前移 MS_ADV_MS + 转 90"。
- *   ★ MS_TURN 步也走同一套转弯序列 (前移+转+找线) -> 那一行的 timeout_ms 不再起作用,
- *     整段由 MS_SEQ_MAX_MS 看门狗兜 (见文件上面 MS_ADV_FAIL_MS/MS_SEQ_MAX_MS)。
+ * ★ 语义全在表里: 传感器只报两种原始事件 —— EV_BLACK (大面积黑) / EV_CORNER (普通弯),
+ *   由【当前步的期望】解释。不符合本步期望的事件一律忽略 —— 所以直线上的污渍/光照
+ *   不会再演化成假房间、假转弯。
+ *   MS_CROSS : 循迹接近 (途中遇到普通弯自己转) -> 大面积黑 = 到口子 -> 按 arg 走:
+ *                arg =  0 = 直行穿过 (盲走到线回阵列正中)   +1 = 右拐 90   -1 = 左拐 90
+ *              ★ 方向写死在表里, 不靠传感器判: 正撞丁字口时左右两支长得一模一样, 判不准。
+ *   MS_TRACK : 循迹; 途中遇普通弯自动"前移+转90"; 退出条件按表 (ROOM = 到大面积黑)。
+ *   MS_TURN  : 定角转, 只用于 180 掉头 (不前移, 直接原地转)。
  * ------------------------------------------------------------------------- */
-/* ---- 下面这张表: 按用户 2026-10-07 口述的路线填 (左右以【小车视角】为准) ---------
- *   每行 = 一步; 行尾注释 = 用户说的那句话。
- *   普通拐弯 / 直行段不占行 (普通弯由 MS_TRACK 自己转, 直行是下一行的循迹段)。
- * ---------------------------------------------------------------------------- */
-/* -- 出发: 直行, 直行经过第 1 个岔路口 (不拐, 穿过) --------------------- */
+/* -- 出发: 左腿上 1m -> 充电区丁字口, 直行穿过 --------------------------- */
   { MS_CROSS,        0,   MS_EX_NONE,       0,      400,  12000,  0,  "J1"   },
-/* -- 直行 (中间一个普通弯右拐) -> 第 2 个岔路口: 直行穿过 -> 去 1 号房间 - */
+/* -- 继续上 3m (左上角普通弯自动右拐) -> 右上角丁字口, 直行 = 进 1 号房间 - */
   { MS_CROSS,        0,   MS_EX_NONE,       0,      400,  12000,  0,  "J2"   },
-/* -- 循迹到 1 号房间口 ---------------------------------------------------- */
   { MS_TRACK,        0,   MS_EX_ROOM,       0,      400,  12000,  0,  "T1"   },
-/* -- 1 号房间: 停车做事 (测温/语音/LCD/LORA 都挂这个钩子) ----------------- */
   { MS_WORK,         0,   MS_EX_TIME,    1500,      200,   8000,  1,  "WORK1"},
-/* -- 掉头 -> 沿支线回上一个路口 -> 转回主路 ------------------------------ */
+/* -- 1 号房间: 掉头 -> 退回右上角丁字口, 左拐 90 下右腿 ------------------- */
   { MS_TURN,      +180,   MS_EX_TURN,       0,      200,   9000,  0,  "U180" },
-  { MS_TRACK,        0,   MS_EX_JUNC,       0,      400,   9000,  0,  "BACK1"},
-  { MS_TURN,  MS_TURN_MEMO, MS_EX_TURN,     0,      200,   6000,  0,  "M90_1"},
-/* -- 直行 -> 岔路口拐弯进 2 号房间 --------------------------------------- */
-  { MS_CROSS,        1,   MS_EX_NONE,       0,      400,  12000,  0,  "J3"   },
+  { MS_CROSS,       -1,   MS_EX_NONE,       0,      400,  12000,  0,  "R1"   },
+/* -- 右腿 1m -> 2 号房间丁字口, 左拐进支线 ------------------------------- */
+  { MS_CROSS,       -1,   MS_EX_NONE,       0,      400,  12000,  0,  "J3"   },
   { MS_TRACK,        0,   MS_EX_ROOM,       0,      400,  12000,  0,  "T2"   },
   { MS_WORK,         0,   MS_EX_TIME,    1500,      200,   8000,  2,  "WORK2"},
   { MS_TURN,      +180,   MS_EX_TURN,       0,      200,   9000,  0,  "U180" },
-  { MS_TRACK,        0,   MS_EX_JUNC,       0,      400,   9000,  0,  "BACK2"},
-  { MS_TURN,  MS_TURN_MEMO, MS_EX_TURN,     0,      200,   6000,  0,  "M90_2"},
-/* -- 直行 -> 岔路口拐弯进 3 号房间 --------------------------------------- */
-  { MS_CROSS,        1,   MS_EX_NONE,       0,      400,  12000,  0,  "J4"   },
+  { MS_CROSS,       -1,   MS_EX_NONE,       0,      400,  12000,  0,  "R2"   },
+/* -- 右腿 1m -> 3 号房间丁字口, 左拐进支线 ------------------------------- */
+  { MS_CROSS,       -1,   MS_EX_NONE,       0,      400,  12000,  0,  "J4"   },
   { MS_TRACK,        0,   MS_EX_ROOM,       0,      400,  12000,  0,  "T3"   },
   { MS_WORK,         0,   MS_EX_TIME,    1500,      200,   8000,  3,  "WORK3"},
   { MS_TURN,      +180,   MS_EX_TURN,       0,      200,   9000,  0,  "U180" },
-  { MS_TRACK,        0,   MS_EX_JUNC,       0,      400,   9000,  0,  "BACK3"},
-  { MS_TURN,  MS_TURN_MEMO, MS_EX_TURN,     0,      200,   6000,  0,  "M90_3"},
-/* -- 直行 -> 普通弯(右拐)进 4 号房间 (普通弯不写行, MS_TRACK 自己转) ------ */
+  { MS_CROSS,       -1,   MS_EX_NONE,       0,      400,  12000,  0,  "R3"   },
+/* -- 右腿到底 -> 4 号房间 (普通直角弯, MS_TRACK 自己转) ------------------- */
   { MS_TRACK,        0,   MS_EX_ROOM,       0,      400,  12000,  0,  "T4"   },
   { MS_WORK,         0,   MS_EX_TIME,    1500,      200,   8000,  4,  "WORK4"},
-/* -- 4 号房间测完掉头; 出门那个口是【普通弯右拐】(主路到这就没了, 不是 T 字口)
- *    -> 自动转, 所以这里【不写 MEMO 行】--------------------------------- */
+/* -- 4 号房间掉头, 出门普通弯右拐回右腿 ----------------------------------- */
   { MS_TURN,      +180,   MS_EX_TURN,       0,      200,   9000,  0,  "U180" },
-/* -- 沿走过的这条路回去: 直行经过两个岔路口 (都直行穿过) ----------------- */
+/* -- 沿右腿北上: 3 号口 / 2 号口 都直行穿过 ------------------------------- */
   { MS_CROSS,        0,   MS_EX_NONE,       0,      400,  12000,  0,  "J5"   },
   { MS_CROSS,        0,   MS_EX_NONE,       0,      400,  12000,  0,  "J6"   },
-/* -- T 字路口左拐 (左 = -90; 走转弯序列: 前移 250ms + 原地转 + 找线) ------ */
-  { MS_TURN,       -90,   MS_EX_TURN,       0,      200,   9000,  0,  "L90"  },
-/* -- 直行 (中间一个普通弯左拐) -> 岔路口拐弯 ------------------------------ */
-  { MS_CROSS,        1,   MS_EX_NONE,       0,      400,  12000,  0,  "J7"   },
-/* -- 直行 (中间一个普通弯左拐) -> 模拟充电区 ----------------------------- */
+/* -- 右上角丁字口: 左拐 90 上顶边 ---------------------------------------- */
+  { MS_CROSS,       -1,   MS_EX_NONE,       0,      400,  12000,  0,  "L90"  },
+/* -- 顶边 3m (左上角普通弯自动左拐) + 左腿下 3m -> 充电区丁字口, 左拐 ---- */
+  { MS_CROSS,       -1,   MS_EX_NONE,       0,      400,  15000,  0,  "J7"   },
   { MS_TRACK,        0,   MS_EX_ROOM,       0,      400,  15000,  0,  "CHG"  },
-/* -- 充电区停 5 秒 ------------------------------------------------------- */
   { MS_WAIT,         0,   MS_EX_TIME,    5000,      300,   8000,  0,  "CHG5S"},
-/* -- 原地掉头; 出门那个普通弯左拐自动转 -> 回主路 -> 直行 -> 停车场 ------ */
+/* -- 掉头出充电区支线 -> 回左腿, 左拐 90 下到停车场 ----------------------- */
   { MS_TURN,      +180,   MS_EX_TURN,       0,      200,   9000,  0,  "U180" },
-  { MS_TRACK,        0,   MS_EX_ROOM,       0,      400,  15000,  0,  "PARK" },
+  { MS_CROSS,       -1,   MS_EX_NONE,       0,      400,  12000,  0,  "M90"  },
+  { MS_TRACK,        0,   MS_EX_ROOM,       0,      400,  12000,  0,  "PARK" },
 /* -- 收工 --------------------------------------------------------------- */
   { MS_END,          0,   MS_EX_NONE,       0,        0,      0,  0,  "END"  },
 };
@@ -264,10 +262,9 @@ static char     ms_status[24];
 /* ---- 路口/转弯 (2026-10-06) ---- */
 static uint8_t  ms_auto_turn        = 0;   /* 普通弯: 正在"前移+原地转" (转完回到本步继续) */
 static uint8_t  ms_turn_seq_on      = 0;   /* MS_TURN 步: 正在跑统一转弯序列 (前移+转+找线) */
-static uint8_t  ms_cross_phase      = 0;   /* MS_CROSS 内部相位: 0=循迹等岔路 1=前移+转 2=盲走穿口 */
+static uint8_t  ms_cross_phase      = 0;   /* MS_CROSS 相位: 0=循迹等到口子 1=前移+转 2=盲走穿口 */
 static uint32_t ms_cross_t0         = 0;   /* 盲走穿口起点 */
-static uint8_t  ms_corner_done      = 0;   /* 本步里已经自动转过一个普通弯 (MS_CROSS 判断用) */
-static int      ms_last_branch_side = 0;   /* 最近一次岔路的分支侧 (+1右/-1左): 回主路那步要用 */
+static uint8_t  ms_thru_ok          = 0;   /* 盲走穿口里"线回到中间"的连续帧数 */
 static uint8_t  ms_busy             = 0;   /* 本拍动作没做完(自动转弯/前移中) -> 别判退出条件 */
 
 /* ---- 转弯序列的状态 (定义放这里, 因为 Mission_Init/Start 里要复位它) ---- */
@@ -354,13 +351,12 @@ static void ms_next_step(uint32_t now)
     ms_sub          = SUB_RUN;
     ms_turn_started = 0;
     ms_work_entered = 0;
-    ms_cross_phase  = 0;             /* 岔路口相位 / 普通弯标记 每步都从头开始 */
-    ms_corner_done  = 0;
+    ms_cross_phase  = 0;             /* 岔路口相位 每步都从头开始 */
+    ms_thru_ok      = 0;
 
-    /* 停车期间(车没动)攒下的路口/房间边沿事件丢掉, 否则下一步一进 RUN 就立刻误触发 */
+    /* 停车期间(车没动)攒下的事件丢掉, 否则下一步一进 RUN 就立刻误触发 */
     (void)Track_TakeCross();
     (void)Track_TakeRoom();
-    (void)Track_TakeBranch();       /* 岔路 / 普通弯 事件也要丢掉 (2026-10-06) */
     (void)Track_TakeCorner();
 
     ms_sync_now(now);
@@ -395,8 +391,7 @@ void Mission_Init(void)
     ms_auto_turn        = 0;
     ms_turn_seq_on      = 0;
     ms_cross_phase      = 0;
-    ms_corner_done      = 0;
-    ms_last_branch_side = 0;
+    ms_thru_ok          = 0;
     ms_busy             = 0;
     ts_state            = TS_IDLE;
     ms_fail             = 0;
@@ -414,14 +409,13 @@ void Mission_Start(void)
     ms_auto_turn        = 0;
     ms_turn_seq_on      = 0;
     ms_cross_phase      = 0;
-    ms_corner_done      = 0;
-    ms_last_branch_side = 0;
+    ms_thru_ok          = 0;
     ms_busy             = 0;
     ts_state            = TS_IDLE;
     ms_fail             = 0;
     ms_sync_now(Get_Time());
     Track_Detect(1);                /* 打开岔路/普通弯判定 */
-    Track_Suppress(TRACK_SUPPRESS_MS);
+    Track_Suppress(MS_START_GUARD_MS);  /* 起步保护: 先离开停车线, 再开始认事件 */
     Track_Reset();                  /* 清循迹的丢线计时/PD 历史 (+ XunJi 里清路口/岔路事件) */
     Mission_OnStepEnter(0);
 }
@@ -772,6 +766,16 @@ static int turn_seq_update(void)
     }
 }
 
+/* "线回到阵列中间" —— 盲走穿口结束时机的判据: 压线路数少, 且都落在中心那几路 */
+static int line_is_clean(void)
+{
+    uint32_t black = (uint32_t)(~track_bits) & 0xFFu;
+
+    if ((track_nblack < 1) || (track_nblack > MS_THRU_MAX_BLACK)) return 0;
+    if ((black & ~(uint32_t)CORNER_CENTER_MASK) != 0)             return 0;
+    return 1;
+}
+
 /*---------------------------------------------------------------------------
  * 循迹一拍 (+ 普通弯自动转) —— MS_TRACK 和 MS_CROSS 的"循迹段"共用
  *   返回 1 = 本拍在自动转弯/前移中 (别去判退出条件)
@@ -784,7 +788,6 @@ static int ms_do_track(void)
         if (turn_seq_update())
         {
             ms_auto_turn   = 0;
-            ms_corner_done = 1;
             Track_Detect(1);                   /* [D] 转完重新打开判定 */
             Track_Suppress(TRACK_SUPPRESS_MS); /* [A] 紧接着屏蔽一段时间 (找线过程别乱判) */
             Track_Reset();                     /* 转完清循迹状态 (丢线计时/PD 历史) */
@@ -837,32 +840,26 @@ void Mission_Run(void)
             ms_busy = ms_do_track();                      /* 循迹 + 普通弯自动转 */
             break;
 
-        case MS_CROSS:                                    /* 岔路口: 循迹到岔路, 再 不转(盲走穿口) / 转(前移+自判方向) */
-            if (ms_cross_phase == 0)
+        case MS_CROSS:                                    /* 到口子/停车线: 循迹接近 -> 大面积黑 -> 按 arg 走 */
+            if (ms_cross_phase == 0)                      /* ① 循迹接近 (途中遇到普通弯自己转) */
             {
                 ms_busy = ms_do_track();
-                if (!ms_busy && Track_TakeBranch())       /* 岔路确认: 主线还在, 该决定走哪边了 */
+                if (!ms_busy && Track_TakeRoom())         /* 大面积黑 = 到口子 (丁字口横杠/停车线) */
                 {
-                    ms_last_branch_side = track_branch_side;   /* 记住方向 (从房间支线回来那步要用) */
-                    if (s->arg == 0)                      /* 不转: 盲走直行穿过去 */
+                    if (s->arg == 0)                      /* arg=0: 直行穿过 */
                     {
                         ms_cross_phase = 2;
                         ms_cross_t0    = now;
+                        ms_thru_ok     = 0;
                     }
-                    else                                  /* 要转: 前移 + 原地转 90 (方向自判) */
+                    else                                  /* arg=±1: 按表拐 90 (方向写死在表里) */
                     {
                         ms_cross_phase = 1;
-                        turn_seq_start(track_branch_side, 0, MS_ADV_MS);
+                        turn_seq_start((s->arg > 0) ? +1 : -1, 0, MS_ADV_MS);
                     }
                 }
-                else if (ms_corner_done)                  /* 这一步的"路口"其实是普通弯: 已经自动转过去了 */
-                {
-                    ms_cross_phase = 0;
-                    ms_enter_stop(now);
-                    return;
-                }
             }
-            else if (ms_cross_phase == 1)                 /* 前移 + 转向序列 */
+            else if (ms_cross_phase == 1)                 /* ② 前移 + 原地转 90 + 找线兜底 */
             {
                 ms_busy = 1;
                 if (turn_seq_update())
@@ -872,10 +869,19 @@ void Mission_Run(void)
                     return;
                 }
             }
-            else                                          /* 盲走穿口 */
+            else                                          /* ③ 盲走穿口: 直走, 直到线回到阵列中间 (或超时) */
             {
                 ms_busy = 1;
-                if ((now - ms_cross_t0) >= (uint32_t)MS_BLIND_THRU_MS)
+
+                if ((now - ms_cross_t0) >= (uint32_t)MS_THRU_MIN_MS)
+                {
+                    Track_ReadOnce();
+                    if (line_is_clean()) { if (ms_thru_ok < 250) ms_thru_ok++; }
+                    else                 { ms_thru_ok = 0; }
+                }
+
+                if ((((now - ms_cross_t0) >= (uint32_t)MS_THRU_MIN_MS) && (ms_thru_ok >= 2)) ||
+                    ((now - ms_cross_t0) >= (uint32_t)MS_THRU_MAX_MS))
                 {
                     ms_cross_phase = 0;
                     ms_enter_stop(now);
@@ -894,20 +900,12 @@ void Mission_Run(void)
             }
             break;
 
-        case MS_TURN:                                     /* 定角转 (IMU): arg = 角度 或 MS_TURN_MEMO
-                                                           * ★ 两种走法 (2026-10-07 用户定的规则, 不要再混):
-                                                           *   (a) 180 度掉头 (|arg| >= 180):
-                                                           *       【原样的直接原地转】—— 不前移、不进转弯序列、
-                                                           *       不找线。这就是最早能跑的那一版 (用户实测掉头正常);
-                                                           *       掉头前那 250ms 前移会把车带出工作位置 -> 掉头做不成。
-                                                           *   (b) 90 度 (MS_TURN_MEMO, 从房间支线回上一个路口):
-                                                           *       【走转弯序列】—— 这个口(也是 T 字口)必须先
-                                                           *       盲走 MS_TURN_ADV_MS 再原地转 90 (用户明确要求),
-                                                           *       转完还会找线兜底。 */
-            /* ★ 判据必须排掉 MS_TURN_MEMO (-2000): 它也 <= -180, 漏掉就会把 -2000 当角度
-             *   传给 ImuTurn (测试台抓到过: TurnDeg(-2000))。 */
-            if ((s->arg != MS_TURN_MEMO) &&
-                ((s->arg >= 180) || (s->arg <= -180)))     /* ---- (a) 掉头: 直接转, 别的什么都不做 ---- */
+        case MS_TURN:                                     /* 定角转 (IMU): arg = ±90 / ±180
+                                                           *   180 掉头: 不前移, 直接原地转 (前移会把车带出工作位)
+                                                           *   90 度   : 走统一转弯序列 (前移 + 转 + 找线兜底)
+                                                           * ★ 拐弯一律用 MS_CROSS (方向写死在表里);
+                                                           *   MS_TURN 只留给掉头这类"必须定角"的场合。 */
+            if ((s->arg >= 180) || (s->arg <= -180))       /* ---- 掉头: 直接原地转, 不前移 ---- */
             {
                 if (!ms_turn_started)
                 {
@@ -924,19 +922,10 @@ void Mission_Run(void)
 
             if (!ms_turn_seq_on)
             {
-                int deg = (int)s->arg;
-
-                if (deg == MS_TURN_MEMO)                      /* 从支线回主路: 用记住的岔路方向 */
-                {
-                    int sd = ms_last_branch_side ? ms_last_branch_side : 1;
-                    deg = (sd > 0) ? MS_DEG_RIGHT : MS_DEG_LEFT;
-                    /* 注: 进支线转 90 + 掉头 180 + 再转 90 = 转回原航向, 所以方向和进来时【同侧】 */
-                }
-
                 ms_turn_started = 1;                          /* MS_EX_TURN 还要用它 */
                 ms_turn_seq_on  = 1;
                 ms_auto_turn    = 1;                          /* 复用: 序列进行中 -> 本步不判超时/退出条件 */
-                turn_seq_start(0, deg, MS_TURN_ADV_MS);       /* 0 = 侧向不用 (角度已给定) */
+                turn_seq_start(0, (int)s->arg, MS_TURN_ADV_MS);   /* 0 = 侧向不用 (角度已给定) */
                 Track_Reset();
                 return;
             }

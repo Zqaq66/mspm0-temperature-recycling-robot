@@ -473,12 +473,12 @@ static void LCD_track(void)
         last_rx = rx;
 
         for (i = 0; i < 8; i++) buf[i] = ((track_bits >> i) & 0x01) ? '.' : '#';
-        /* 后 4 格 = 岔路/普通弯 判定结果 (标定 XunJi.c 的 BRANCH_WIN_FRAMES 就看这个):
-         *   B+ = 判成岔路, 分支在右   B- = 岔路在左 (主线还在, 可以直行/可以拐)
-         *   C+ = 判成普通弯, 往右拐   C- = 普通弯往左 (主线自己拐走了 -> 车自己转)
-         *   SUP = 现在判定被关着 (转向过程 / 转完后的屏蔽窗口)   --- = 没有判定结果 */
-        if (Track_GetSuppressed()) sprintf(buf + 8, " SUP");   /* 判定被关着 (转向中/收工后的屏蔽窗口) */
-        else if (track_branch)     sprintf(buf + 8, " B%c", (track_branch_side > 0) ? '+' : '-');
+        /* 后 4 格 = 事件层状态 (对路线表用):
+         *   Pnt = 现在是大面积黑 (丁字口横杠 / 停车线 / 房间黑块)
+         *   C+  = 现在线从侧面离开, 且往右拐    C- = 往左拐 (普通弯)
+         *   SUP = 判定被关着 (转向/找线中)      --- = 什么都没发生 */
+        if (Track_GetSuppressed()) sprintf(buf + 8, " SUP");
+        else if (track_room)       sprintf(buf + 8, " Pnt");
         else if (track_corner)     sprintf(buf + 8, " C%c", (track_corner_side > 0) ? '+' : '-');
         else                       sprintf(buf + 8, " ---");
         lcd_row(LCD_Y(R_BITS), buf, GREEN);
