@@ -23,7 +23,7 @@
  * 调参:   全部在 middle/XunJi.c 顶部 (质心/极性/PD 增益/过渡带/降速/丢线)
  * ==============================================================*/
 
-void Track_Init(void);      /* PID/状态初始化, 上电调一次 */
+void Track_Init(void);      /* 循迹状态初始化, 上电调一次 */
 void Track_Run(void);       /* 5ms 调一次: 读灰度 -> 质心 -> PD -> 左右 PWM */
 void Track_Reset(void);     /* 重新开始前清状态 (丢线计时/PD 历史) */
 
@@ -88,20 +88,11 @@ void Track_StepSpeed(int dir);      /* dir>0 加速一档, dir<0 减速一档 */
  *   [D] Track_Detect(0/1)   转向(前移+原地转)全过程关掉判定 (状态机调)
  *   [A] Track_Suppress(ms)  收工后再屏蔽 ms (那段是"找线过程", 蹭到线很正常)
  * D/A 由 Mission 调 (turn_seq 起转/收工 + 每次步间停车), 本层只提供开关。 */
-#ifndef BRANCH_LINE_MAX_BLACK
 #ifndef BRANCH_REQ_EDGE_CLEAR
-#define BRANCH_REQ_EDGE_CLEAR   1   /* "岔路"除了"中心有线 + 整体细线", 还要求【触发的那侧 3 路已清空】
-                                      * 0 = 老行为 (只看中心), 1 = 收紧。
-                                      * 为什么必须加: 窗口刚开时, 那 3 路展宽黑本身就和"中心掩码" bit2~5
-                                      * 重叠 (右触发含 bit5, 左触发含 bit2) -> "中心有线"当场成立,
-                                      * 于是【三路宽、贴阵列端、停几帧】的普通直角弯被当成岔路 (2026-10-07 实测)。
-                                      * 用户给的模型: 普通弯 ...##... -> ...##### -> ........ (变全白);
-                                      * 岔路 ...##... -> .....### -> ...##... (中线回来, 且边侧已经不黑了)。 */
+#define BRANCH_REQ_EDGE_CLEAR   1   /* 1 = "岔路"还要求触发那侧 3 路已清空 (区分直角弯; 0 = 只看中心) */
 #endif
-#define BRANCH_LINE_MAX_BLACK   3      /* "岔路"判据: 主线回来时必须还是【细线】(总压线 <= 3)
-                                        *   ★ 为什么: 过直角弯时, 拐角那条新臂会整段压在阵列上
-                                        *   (# 从一端连到中心, nb=4~5), 老判据"中心任一路压线"会把它
-                                        *   当成"主线回来了" -> 直角弯被判成岔路。收紧成"细线"即可区分。 */
+#ifndef BRANCH_LINE_MAX_BLACK
+#define BRANCH_LINE_MAX_BLACK   3   /* "岔路"要求主线回来时仍是细线 (总压线 <= 3, 否则是拐角新臂) */
 #endif
 #ifndef CROSS_EDGE_BLACK_REQ
 #define CROSS_EDGE_BLACK_REQ    3      /* 触发要求外侧连续压线路数 (3 = 边侧 3 路) */
@@ -154,8 +145,5 @@ int  Track_ReadOnce(void);
 int  Track_LineFound(void);
 int  Track_LineCentered(void); /* 1 = 细线正压在阵列正中 (bit3/bit4 压线 且 总压线 <= 3)
                                 *   转弯的"传感器出口"判据: 成立 = 车已经转到位 + 线在车轴正下方 */
-
-/* ------- 旧实现(未使用, 保留备查): 权重 ±16/±12/±8/±4 ×5 + 低通 ------- */
-int Track_Err(uint8_t Digtal);
 
 #endif

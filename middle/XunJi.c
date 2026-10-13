@@ -766,33 +766,3 @@ void Track_Stop(void)
     Motor_Brake();                 /* 短路制动: 停得住, 不滑 */
 }
 
-/*---------------------------------------------------------------------------
- * 旧实现(本工程原有, 未被调用, 保留备查)
- *-------------------------------------------------------------------------*/
-int Track_Err(uint8_t Digital)
-{
-    int weight[8] = {-16, -12, -8, -4, 4, 8, 12, 16};
-    int sum = 0;
-    int activeSensors = 0;
-    static int lastErr = 0;
-
-    for (int i = 0; i < 8; i++)
-    {
-        if (!((Digital >> i) & 0x01))
-        {
-            sum += weight[i];
-            activeSensors++;
-        }
-    }
-    if (activeSensors == 0) return lastErr;
-
-    {
-        int err = (sum / activeSensors) * 5;
-        int maxErr = (36 + (8 - activeSensors) * 2) * 5;
-        if (err >  maxErr) err =  maxErr;
-        if (err < -maxErr) err = -maxErr;
-        err = (err * 3 + lastErr) / 4;
-        lastErr = err;
-        return err;
-    }
-}

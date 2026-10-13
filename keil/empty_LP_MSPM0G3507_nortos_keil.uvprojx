@@ -460,16 +460,6 @@
               <FilePath>..\middle\Task.h</FilePath>
             </File>
             <File>
-              <FileName>PID.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\middle\PID.c</FilePath>
-            </File>
-            <File>
-              <FileName>PID.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\middle\PID.h</FilePath>
-            </File>
-            <File>
               <FileName>XunJi.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\middle\XunJi.c</FilePath>
@@ -545,16 +535,6 @@
               <FilePath>..\app\Motor.h</FilePath>
             </File>
             <File>
-              <FileName>Encoder.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\app\Encoder.c</FilePath>
-            </File>
-            <File>
-              <FileName>Encoder.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\app\Encoder.h</FilePath>
-            </File>
-            <File>
               <FileName>MLX90614.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\app\MLX90614.c</FilePath>
@@ -563,16 +543,6 @@
               <FileName>MLX90614.h</FileName>
               <FileType>5</FileType>
               <FilePath>..\app\MLX90614.h</FilePath>
-            </File>
-            <File>
-              <FileName>HC05.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\app\HC05.c</FilePath>
-            </File>
-            <File>
-              <FileName>HC05.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\app\HC05.h</FilePath>
             </File>
             <File>
               <FileName>TW.c</FileName>

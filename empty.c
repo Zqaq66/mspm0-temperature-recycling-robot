@@ -30,248 +30,46 @@
  * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 /*===========================================================================
- * MSPM0G3507 四轮小车 —— 主程序 (main + 协作式调度器 + 两套应用层)
+ * MSPM0G3507 四轮麦克纳姆轮小车 —— 主程序 (main + 协作式调度器)
  *
- *   本文件: System_Init() / main() / 5·10·20·100·1000ms 任务 / 循迹 与 电机测试 两个模式
- *   两套固件二选一, 只改 [1] 里的 APP_MODE 一行; 调度器在 middle/Task.c, 时基在 middle/Timer.c
+ * 功能: 沿黑线循迹, 按 Mission.c 的 route[] 表走路线; 到房间停下做
+ *       语音提示 + 测温 + 读电量 + 屏显结果 + LORA 上报。
+ * 控件: 板载 S2(PB21) 单击 = 开始/停止, 长按 = 加减速档。
  *
- * ============================ [1] 模式与开关 ============================
- *   APP_MODE      = APP_MODE_TRACK (默认) | APP_MODE_MOTOR_TEST   ← 切固件只改这一行
- *   app_mode      = APP_MODE 的运行期副本 (各处都判它; 运行期没人改, 不是热切换)
- *   app_run       = 0 停 / 1 跑, 由板载 S2 单击切换 (上电默认 0 = 停)
- *   SKIP_OPEN_LOOP= 仅电机模式有效; 1 = 上电直接进闭环速度环 (跳过 26.5s 开环自检)
+ * ---- 任务划分 (middle/Task.c 调度) ----
+ *   1ms(中断) 按键扫描 + 时基 Get_Time()
+ *   5ms       循迹/任务状态机推进 (ImuTurn 忙时让出电机)
+ *   10ms      处理按键事件 (单击启停 / 长按调速)
+ *   20ms      IMU 姿态帧解析
+ *   100ms     LCD 文字影子 (推屏在主循环 LCD_RowFlush 里分摊)
+ *   1000ms    授时轮询
  *
- * ============================ [2] 任务划分 (middle/Task.c 调度) ============================
- *   周期     循迹模式 (TRACK)                      电机测试模式 (MOTOR_TEST)
- *   --------------------------------------------------------------------------------------
- *   5ms      Track_Run(): 读灰度+质心+PD+写PWM     —
- *   10ms     处理按键事件: 单击启停 / 长按调速      同左 (调的是闭环目标)
- *            (Key_Scan() 本身在 1ms 中断钩子里跑, 事件缓存后这里取走)
- *   20ms     编码器采样 + IMU 解析                   开环阶段表 / 四路闭环速度环, 写 PWM
- *   100ms    LCD_track() 只写文字影子(不碰 SPI)     阶段推进 + LCD_status()
- *   1000ms   串口日志 (默认整段注释掉)              同左
- *   主循环    LCD_RowFlush(): 每 1ms 最多推 1 行屏 (<=0.9ms) —— 别的模块不用等 LCD
- *   注: 5ms 槽在 IMU 转向/保向忙时改跑 ImuTurn_Update() —— 两者不会同时写 PWM
- *   注: 路口/转弯由 Mission 决定: 岔路口看路线表"要不要转"(方向由传感器判),
- *       普通弯车自己转; 转弯前先盲走 MS_ADV_MS (补传感器前伸的距离) 再原地转
- *   注: 推屏开销摊在主循环夹缝里, 不占任何任务槽, 也不会把 5ms 控制环顶掉。
- *       (改造前是 100ms 任务里整块刷 114ms, 把主循环卡死, 屏上 L 一直报 114/115)
- *   时基: TIMER_0 = 1ms 中断 -> Get_Time();  printf 出口 = LORA 口 UART3 (PB2/PB3, 9600)
+ * ---- 模块 ----
+ *   middle/XunJi.c    循迹: 平方加权质心 + 三区 PD + 路口/房间/岔路判定
+ *   middle/Mission.c  任务状态机: route[] 表驱动 (动作 / 退出条件 / 步间停车)
+ *   middle/ImuTurn.c  IMU 原地定角转 (四段 + 自标定 + 脉冲补)
+ *   middle/TimeSync.c I2C1 授时查询端 (ESP32-S2 0x42)
+ *   middle/UART.c     printf 出口 = LORA 口 UART3; UART0 = 语音
+ *   app/Motor.c       TB6612 x2 四轮 PWM/方向/短路制动
+ *   app/MLX90614.c    红外测温 (I2C0 0x5A)   app/TW.c 语音播报 (UART0)
+ *   hardware/lcd.*    ST7735S 128x160 + 批量刷屏 + 文字影子层
+ *   grayscale/       芯流 AuroraT8 八路灰度 (I2C0 0x40)
  *
- * ============================ [3] 板载按键 (只用 S2 = PB21, 无需接线) ============================
- *   单击 (按住 <0.6s 松开)  ->  开始 / 停止           屏上: STOP press S2
- *   长按 (按住 >0.6s)       ->  加速一档, 之后每 0.1s 再加一档; 到上限自动回绕到下限
- *   循迹模式: 调基础速度 150~900 (默认 400)          屏上: RUN Bxxx
- *   电机模式: 调闭环目标   5~200 (默认 TARGET_SPEED) 屏上: TGT xxx CLOSED
- *   调默认值: middle/XunJi.h  TRACK_SPEED_DEFAULT / empty.c  TARGET_SPEED
- *   调手感:   middle/Key.c    KEY_LONG_TICKS(长按 60=600ms) / KEY_REPEAT_TICKS(连发 10=100ms)
- *   不想回绕: middle/XunJi.c  Track_StepSpeed() 里改成封顶 (注释里有写法)
+ * ---- 接线速查 (详见各驱动头文件) ----
+ *   电机 PWM A=PA12 B=PA13 C=PA17 D=PA7   方向 A=PB19/20 B=PB4/5 C=PB6/7 D=PB12/13
+ *   STBY=PB0                              灰度 SDA=PA0 SCL=PA1
+ *   LCD SCLK=PB9 MOSI=PB8 RES=PB10 DC=PB11 CS=PB14 BLK=PB26
+ *   IMU TX=PA9 RX=PA8 (115200)            LORA TX=PB2 RX=PB3 (9600, printf 出口)
+ *   授时 SDA=PA30 SCL=PA29 (400k, 0x42)    语音 TX=PA10 RX=PA11
+ *   电池电压 ADC0 = PA27 (板上 1/4 分压)
  *
- * ============================ [4] 接线表 ============================
- *
- *   [4.1] 电源 (先接电源, 再接信号)
- *     12V 电池 +     ->  TB6612 #1 的 VM 和 #2 的 VM (两片 VM 并联)
- *     12V 电池 -     ->  MCU GND              (必须共地)
- *     LaunchPad 3V3  ->  两片 VCC             (逻辑电源必须 3.3V, 不能接 5V:
- *                                             TB6612 逻辑门限 = 0.7*VCC, 接5V时 3.5V > 3.3V 会识别不稳)
- *     LaunchPad GND  ->  两片 GND
- *     注意: 12V 绝不进 MCU / 3V3
- *
- *   [4.2] TB6612 #1 —— 前桥 (A 左前 / B 右前)
- *     TB6612 引脚        接 MCU                      接电机
- *     ------------------------------------------------------------------
- *     PWMA               PA12 (TIMG0_CCP0, 20kHz)
- *     AIN1               PB19
- *     AIN2               PB20
- *     AO1 / AO2                                     A 左前电机 + / -
- *     PWMB               PA13 (TIMG0_CCP1, 20kHz)
- *     BIN1               PB4
- *     BIN2               PB5
- *     BO1 / BO2                                     B 右前电机 + / -
- *     STBY               PB0  (两片 STBY 拧在一起接 PB0)
- *     VM / VCC / GND     见 [4.1]
- *     注: 芯片丝印的 A/B 通道 不是 轮位 A/B; #1 片的 A 通道驱动 A 轮, B 通道驱动 B 轮
- *
- *   [4.3] TB6612 #2 —— 后桥 (C 右后 / D 左后)
- *     PWMA               PA17 (TIMG7_CCP0, 20kHz)
- *     AIN1               PB6
- *     AIN2               PB7
- *     AO1 / AO2                                     C 右后电机 + / -
- *     PWMB               PA7  (TIMG7_CCP1, 20kHz)
- *     BIN1               PB12
- *     BIN2               PB13
- *     BO1 / BO2                                     D 左后电机 + / -
- *     STBY               PB0  (和 #1 的 STBY 并联)
- *     不想用 GPIO 控 STBY: 两片 STBY 直接接 3V3 (常使能), Motor_Enable() 就失效
- *
- *   [4.4] 编码器 (每路: A相 / B相 两根信号线, 另加 VCC / GND 供电)
- *     A 左前:  A相 -> PA21    B相 -> PA26      VCC -> 3V3, GND -> GND
- *     B 右前:  A相 -> PA31    B相 -> PA28      VCC -> 3V3, GND -> GND
- *     C 右后:  A相 -> PA24    B相 -> PA25      VCC -> 3V3, GND -> GND
- *     D 左后:  A相 -> PA14    B相 -> PA15      VCC -> 3V3, GND -> GND
- *     - 编码器电源用 3V3 (模块若必须 5V, A/B 相要分压或加电平转换)
- *     - 这 8 个脚是 RESISTOR_NONE (无内部上下拉); 编码器若为开漏输出, A/B 各加 10k 上拉到 3V3
- *     - A/B 相接反不用拆线: 改 app/Encoder.c 里的 ENC_x_REVERSE
- *     - 电机线 M+ / M- 接 TB6612 的 AO1/AO2 (或 BO1/BO2), 别接到编码器的信号线上
- *
- *   [4.5] 灰度传感器 (循迹模式用; 芯流 AuroraT8 八路)
- *     SDA -> PA0    SCL -> PA1    (硬件 I2C0, 400kHz, 模块地址 0x40)
- *     VCC -> 3V3    GND -> 共地    (用 3V3 可避免 I2C 上拉被抬到 5V)
- *     - 与 MLX90614 (0x5A) 共用同一条 I2C0 总线
- *     - 探头朝下, 8 路垂直于前进方向横排, 居中安装
- *
- *   [4.6] LCD (ST7735S 128x160, 硬件 SPI1 = PB9/PB8, 40MHz)
- *     SCLK -> PB9     SDA/MOSI -> PB8     RES -> PB10
- *     DC   -> PB11    CS -> PB14          BLK -> PB26      VCC -> 3V3, GND -> 共地
- *     - 刷屏走批量通道 (hardware/lcd.c 的 LCD_ShowRowFast / LCD_FillFast): CS 只翻一次,
- *       一行 4096 字节 0.82ms, 整屏填充 8.2ms; 文字层 LCD_RowSet/LCD_RowFlush 非阻塞
- *       (写影子 + 主循环 1ms 一行), 所以 LCD 不会卡住循迹/转向/以后的测温语音模块
- *
- *   [4.7] IMU (YbIMU 六轴, 姿态/转向用)
- *     VCC -> 3V3     GND -> 共地
- *     TX  -> PA8     RX  -> PA9     (模块 TX 接 MCU RX, 交叉接)
- *     - 用 UART1, 115200-8-N-1, 25Hz 自动上报 (0x7E 0x23 帧); RX 内部上拉已开
- *     - 驱动 app/imu_uart_driver.c/.h (照搬 Competition_PJ/BSP/IMU, 只把 delay.h 换成 Time.h)
- *     - 屏上 IMU 行显示当前航向 yaw (灰字 = IMU 没数据: 没接好 / TX-RX 没交叉 / 波特率不对)
- *       "RXn" (每 100ms 收到的字节数, 正常约 70~80) 要 LCD_DEBUG=1 才显示
- *
- *   [4.8] 上电前检查
- *     1) 万用表量 VM-GND / VCC-GND 不短路; VCC 实测 3.3V, VM 实测 12V
- *     2) 电池负 与 LaunchPad GND 导通 (共地)
- *     3) 四个轮子悬空再上电
- *
- * ============================ [5] 循迹模式 (APP_MODE_TRACK) ============================
- *   读法:   5ms 读 0x09 八路模拟量 (0~255, 除8数据, 越大越黑) —— 不读 0x0C 数字量
- *   算法:   平方加权质心  pos = Σ(v*v*i*100) / Σ(v*v)   -> 0~700, 中心 350 (亚路分辨率)
- *             error = pos - 350                          (负 = 线偏左)
- *           三区增益调度 PD: |err|<40 用直线软增益, >=160 用弯道激进增益, 中间线性过渡
- *             turn = (Kp*error + Kd*低通Δerror) / 1024   (Q10 定点)
- *           弯道自适应降速: 弯得越深速度越低 (最多降到 50%)
- *           左 = speed + turn, 右 = speed - turn          (turn>0 = 线偏右 -> 左轮快 = 右转)
- *           左 = A 左前 + D 左后 ; 右 = B 右前 + C 右后   (Motor_SetLeftPWM/SetRightPWM)
- *   丢线:   丢线瞬间按"丢线前最后一帧的 |error|"分流 (阈值 LOST_SIDE_ERR = 120):
- *             A 偏出 (|E| >= 120): 线被甩到一侧 -> 直接按偏向差速转弯找回, 不直行、不原地转
- *                                   (内侧轮慢 + 外侧轮快, 两轮同向);
- *                                   外侧 = LOST_TURN_SPEED(250), 差速 = LOST_TURN_DIFF(150);
- *                                   找超过 LOST_FIND_TIMEOUT_MS(2500ms) 仍未见到线 -> 停车
- *             B 中间消失 (|E| < 120): 线在中间突然没了 -> 保持直行 LOST_STRAIGHT_MS(500ms) -> 停车
- *             丢线头 60ms (LOST_KEEP_MS) 先保持上一拍输出 (防单帧误丢乱打);
- *             线一回来立刻自动恢复巡线 (不用按键)
- *   屏上 (工作模式 5 行, 一行 16 字符, 行距 16px 不重叠):
- *           第1行 状态 + 基速: STOP press S2 / LOST nnn(丢线时长ms) / Mxx 步名 子状态 Bxxx
- *           第2行 L左轮PWM R右轮PWM
- *           第3行 P质心(0~700, 中心350) E误差(负=线偏左)
- *           第4行 IMU 航向 yaw; 转向中变成 "Y 当前角 E 剩余角"
- *           第5行 授时时间 (模块没联上网就不显示; 总线故障红字 TIME I2C ERR)
- *           标定/查问题时把 LCD_DEBUG 改成 1, 会多出 3 行:
- *             8 路点位('#'=压线) + 岔路/普通弯判定(B±/C±) / X路口 H房间 N路口数 L主循环抖动
- *             / V降速后速度 RX IMU字节 ERR灰度I2C错误
- *             第9~10行 8 路原始值 (0~255, 越大越黑; 一行 4 路) —— 标定阈值看这个
- *   调参:   全部在 middle/XunJi.c 顶部 (质心阈值/极性/镜像/LR、PD 与过渡带、D 低通、
- *           降速比、丢线参数) —— 见 [7] 的顺序
- *   注:     循迹用的是开环 PWM; 想接编码器速度环, 把 Motor_SetLeft/RightPWM() 换成写
- *           Target_A/B/C/D 即可 (当前没接, 麦轮打滑会让速度环失真)
- *
- * ============================ [6] 电机测试模式 (APP_MODE_MOTOR_TEST) ============================
- *   单击 S2 开始后自动跑 (开环全程约 26.5 秒), 屏第 1 行 = 阶段 + 名字, 第 6 行 = OPEN/CLOSED:
- *     1 - 4    只有 A 左前: 正转 -> 停 -> 反转 -> 停            (1.2s / 0.8s)
- *     5 - 8    只有 B 右前: 同上
- *     9 - 12   只有 C 右后: 同上
- *     13 - 16  只有 D 左后: 同上
- *     17 - 20  四轮一起: 前进 -> 停 -> 后退 -> 停               (2s / 1s)
- *     21 - 22  四轮原地左转 / 右转                           (1.5s)
- *     23       全停                                         (1.5s)
- *     24+      闭环速度环: 四轮一直转, 第 6 行变 TGT 40 CLOSED
- *             (SKIP_OPEN_LOOP=1 时跳过 1~23 段, 一上电就是这个状态)
- *
- *   看现象定位问题:
- *     某个阶段动了别的轮子          -> 通道 / 接线错位
- *     标 FWD 却反转                 -> app/Motor.c 里 MOTOR_x_REVERSE 改 1
- *     闭环阶段 SPD 为负 / 一顿一顿  -> app/Encoder.c 里 ENC_x_REVERSE 改 1
- *     某轮 SPD 恒为 0               -> 该路编码器没接 / 相线接错
- *
- *   调参入口: empty.c 的 TARGET_SPEED 和 steps[] 表; middle/PID.c 的 Velocity_Kp/Ki/Kd
- *
- * ============================ [7] IMU 转向 / 保向 API (middle/ImuTurn.c) ============================
- *   两个动作, 都靠 yaw 闭环, 都【独占电机】—— 忙的时候循迹自动让出 (见 [2] 的注):
- *     ImuTurn_TurnDeg(delta_deg, speed)   原地差速转到指定角度, 到位自动停车
- *                                         delta_deg 正=左转(逆时针); speed 旋转 PWM (0 -> 300)
- *     ImuTurn_HoldAbs(abs_yaw, speed)     保持绝对航向: speed>0 边走边修, speed=0 原地锁角
- *   辅助:
- *     ImuTurn_IsBusy()        1 = 忙 (5ms/20ms 任务据此让出电机)
- *     ImuTurn_JustFinished()  本拍刚结束 (读后清零); ImuTurn_GetDoneReason() 看原因
- *     ImuTurn_Stop()          急停/放弃;  ImuTurn_GetYaw/GetDiff/GetTarget()  调试
- *     ImuTurn_SetDoneCallback(cb)         完成回调, 在里面做下一步动作
- *     ImuTurn_GetLastErr()    上次落点误差(度, 绝对值)  <- 验收就看它
- *     ImuTurn_GetDecel()      当前标定出的减速能力 a (度/秒^2)
- *     ImuTurn_GetCoast()      本拍预测的滑行角(度); ImuTurn_GetPulseCount() 上次用了几拍脉冲
- *     ImuTurn_ResetCalib()    标定值退回种子值 (让它重新学)
- *   结束原因: ARRIVED(到位) / STOPPED(被停) / IMU_OFF(掉线自动停) / TIMEOUT(超时自动停) / ERRWAY(方向反/被顶住)
- *   用法示例:
- *     if (ImuTurn_TurnDeg(+90, 0) == 0) { }          // 左转 90 度 (0 = 用 IMU_TURN_SPEED_MAX), 5ms 任务会自己推
- *     if (ImuTurn_JustFinished()) { 下一步; }         // 轮询完成 (或在回调里做)
- *     ImuTurn_HoldAbs(90.0f, 250);                   // 保持 90 度航向往前走
- *   调参: middle/ImuTurn.h 顶部 —— 转向主要调 IMU_TURN_SPEED_MAX (远段速度) /
- *         IMU_TURN_CUT_MARGIN (老冲过头就 +1) / IMU_TURN_ARRIVE_DEG (想到位多准)。
- *         ★ 减速能力 a 不用手调: 每次转完自动标定, 串口 TURN done 那行会打出来。
- *   看现象: 屏第 4 行平时是 "YAW +xx"(当前航向), 转向中变成 "Y +xx E +xx"(当前角/剩余角)
- *         ★ 调转向参数要看相位和角速度: 把 LCD_DEBUG 改成 1, 转向中会显示 "Y… E… 相位 角速度"
- *           相位: D=远段定速 C=近段低速 B=断电等停稳 P=脉冲微调
- *   演示: 把本文件顶部的 IMU_TURN_DEMO 改成 1 -> 单击 S2 后自动跑
- *         "原地左转 90 -> 保持该航向直行 2s -> 停车"
- *
- * ============================ [8] 调参顺序 (按这个顺序来, 一次只改一个) ============================
- *
- *   0) 先定方向 —— 还没到调 PID 这步:
- *        某轮转向与指令相反             -> app/Motor.c     MOTOR_A/B/C/D_REVERSE 改 1
- *        某轮实测速度为负 / 闭环抖       -> app/Encoder.c   ENC_A/B/C/D_REVERSE 改 1
- *        灰度探头左右装反(挡左边右边亮)   -> middle/XunJi.c  TRACK_SENSOR_FLIP 改 1
- *        越偏越往错方向打(纠正方向反)     -> middle/XunJi.c  TRACK_LR_SWAP 改 1
- *        白底数值反而比黑线大(极性反)     -> middle/XunJi.c  TRACK_DARK_IS_HIGH 改 0
- *
- *   1) 传感器自检 (不用按键: 停着也读传感器, 见下方"观察模式"): 先把 LCD_DEBUG 改成 1
- *        阈值是自动的: 上电采 20 帧白底 -> 每路一个阈值 (白底基线+60), 见 XunJi.c 顶部;
- *        白底上哪一路数值偏高 (最外侧常见) 会在第9~10行看出来, 偏太多就加大 ADAPT_MARGIN
- *        屏上会多出 8 个点位符号, 拿黑线依次挡每个探头, 位置一一对应
- *        ERR 必须恒为 0 (非 0 = 灰度 I2C 没通)
- *
- *   2) 基础速度 (单击 S2 开始 / 长按加速, 屏第1行 RUN Bxxx):
- *        先在 250 ~ 400 把循迹调稳, 稳了再往上提; 提速后 Kp 一般要同步降一点
- *        (LCD_DEBUG=1 时屏上有 Vxxx = "弯道降速后"的实际速度: 过弯时它掉下来 = 降速在工作)
- *
- *   3) 转向 PD (Q10 定点, 1024 = 1.0) —— middle/XunJi.c 顶部
- *        TRACK_KP / TRACK_KD          弯道段增益 (默认 1000 / 1200)
- *        TRACK_STRAIGHT_KP / KD       直线段增益 (默认 500 / 600, 用来压直线微振)
- *        TRANSITION_LOW / HIGH        过渡带 (默认 40 / 160), 中间线性插值, 不分档跳变
- *        D_FILTER_STRENGTH            D 项低通强度 (默认 3 = 1/8)
- *        CURVE_REDUCE_PCT             弯道最大降速% (默认 50)
- *        直线画龙        -> TRACK_STRAIGHT_KP 调小 (500 -> 300)
- *        弯道切内线/出线 -> TRACK_KP 调大 (1000 -> 1300), 同时把基础速度降一档
- *        过冲/回摆大     -> TRACK_KD 调大 (1200 -> 1800), 或把 D_FILTER_STRENGTH 加到 4
- *        过弯太慢/太急   -> CURVE_REDUCE_PCT 调小 / 调大
- *        屏第3行 P 跳变、E 不连续 -> NOISE_THRESHOLD (默认 30) 太大, 或极性反了
- *
- *   4) 丢线参数 (middle/XunJi.c 顶部):
- *        LOST_SIDE_ERR(120)        判"偏出"还是"中间消失"的 |error| 分界
- *        LOST_TURN_SPEED(250)      找回线外侧轮 PWM (别超过正常巡线速度)
- *        LOST_TURN_DIFF(150)       找回线内外差速 (内侧 = 250-150 = 100, 同向不反转)
- *        LOST_FIND_TIMEOUT_MS(2500) 偏出找回多久还没找到就停车 (填 0 = 一直找)
- *        LOST_STRAIGHT_MS(500)     中间消失后直行多久停车
- *        LOST_KEEP_MS(60)          丢线头去抖窗口 (保持上一拍输出)
- *        屏第1行 LOST nnn 是丢线时长(ms): 一直涨 = 没找回; 停在 500 附近 = 中间消失已停车;
- *        停在 2500 附近 = 偏出找超时停车
- *
- *   5) 闭环速度环 (只跑电机测试模式; SKIP_OPEN_LOOP=1 上电直接进闭环)
- *        屏上 SPD 追不上 TGT   -> TARGET 调低, 或 middle/PID.c 的 Velocity_Kp 加大 (现 5)
- *        SPD 一顿一顿 / 嗡嗡响 -> Velocity_Kp 减小, 或 Velocity_Kd 加一点 (现 0)
- *        稳态总差一点          -> Velocity_Ki 加大 (现 1); 但输出顶到 ±700 就是目标定太高
- *        SPD 符号与 TGT 反     -> app/Encoder.c 的 ENC_x_REVERSE
- *
- *   6) 调参时的两个坑:
- *        所有参数都是编译期宏 —— 改完必须重新编译下载, 没有运行时可改的入口
- *        调试日志别用 printf: 9600 下发一行要 20~40ms, 会把 5ms 循迹节拍卡住 -> 看屏幕
+ * ---- 主要开关 (都能用 Keil Misc Controls 加 -Dxxx=1 覆盖) ----
+ *   MISSION_ENABLE       1 = 按路线表跑 / 0 = 纯循迹
+ *   WORK_FEATURES        1 = 房间环节 (测温/电量/屏显结果区/LORA/语音)
+ *   LCD_DEBUG            1 = 屏第 6~10 行显示标定/诊断 (与 WORK_FEATURES 抢屏, 二选一)
+ *   MISSION_DEBUG_STEPS  (Mission.c) N>0 只跑前 N 步, 台架分段验路线
+ *   调参入口都在各模块 .c/.h 顶部
  *===========================================================================*/
-
 #include <stdio.h>
 #include "ti_msp_dl_config.h"
 #include "Task.h"
@@ -280,8 +78,6 @@
 #include "lcd.h"
 #include "lcd_init.h"
 #include "Motor.h"
-#include "Encoder.h"
-#include "PID.h"
 #include "XunJi.h"          /* 循迹层: Track_Init/Track_Run */
 #include "Key.h"            /* 板载按键: 速度在线可调 */
 #include "imu_uart_driver.h"/* IMU: YbIMU UART 驱动 (UART1 PA8=TX/PA9=RX) */
@@ -319,30 +115,10 @@
 #define TEMP_SAMPLES    4
 #define TEMP_GAP_MS     25
 
-#define TARGET_SPEED   40       /* 闭环目标: 编码器计数 / 20ms (先给小的, 按实测调) */
-
-/* ---- 调试开关 ----
- * 1 = 上电直接进闭环速度环 (跳过 26.5 秒开环自检, 专门调速度环用)
- * 0 = 正常流程: 先跑 23 段开环自检(验证通道/转向), 再进闭环 */
-#define SKIP_OPEN_LOOP   1
-
-/* ---- 应用模式 (二选一) ----
- * APP_MODE_MOTOR_TEST : 电机测试 (开环阶段表 -> 闭环速度环)
- * APP_MODE_TRACK      : 循迹 (5ms 读灰度 -> 加权质心 -> PD -> 左右 PWM) */
-#define APP_MODE_MOTOR_TEST  0
-#define APP_MODE_TRACK       1
-#define APP_MODE             APP_MODE_TRACK
-
-uint8_t app_mode = APP_MODE;
-
 /* ---- 运行开关: S2(PB21) 单击切换 ----
  * 0 = 停 (上电默认): 电机输出全 0, 循迹不跑, 屏上显示 STOP
- * 1 = 跑: 循迹 / 电机测试按各自流程走 */
+ * 1 = 跑: 循迹 / 任务状态机 */
 uint8_t app_run = 0;
-
-/* IMU 转向/保向"刚结束"标志: 由 5ms 任务在 ImuTurn_JustFinished() 时置 1,
- * 应用层用完自己清 0 (完成原因看 ImuTurn_GetDoneReason()) */
-uint8_t imu_turn_done = 0;
 
 /* ---- 屏幕调试行开关 ----
  * 0 = 工作 (默认): 只显示 5 行工作信息, 屏干净
@@ -370,133 +146,7 @@ void APP_SysTick_Hook(void)
     key_scan_cnt++;
 }
 
-/* ---- IMU 转向演示开关 ----
- * 1 = 编进固件: 单击 S2 开始后自动跑一遍
- *       原地转 IMU_TURN_DEMO_DEG 度 (正=左/逆时针, 负=右/顺时针)
- *       -> 再反向转同样角度 (IMU_TURN_DEMO_BACK=1, 验证反方向 + 从非零角度起步)
- *       -> 原地锁住该角度 2s (speed=0, 车不动) -> 停车
- *       要测 180 度: 把下面 IMU_TURN_DEMO_DEG 改成 180 就行 (v7 门限是算出来的, 不用改参数)
- * 只用于台架验证 ImuTurn 的接口, 正式跑改回 0 (演示期间循迹不参与) */
-#define IMU_TURN_DEMO   0        /* ★ 开了任务状态机(MISSION_ENABLE=1)就必须关掉它:
-                                  * 演示和状态机会同时调 ImuTurn, 互相抢电机。
-                                  * 要单独台架测转弯: 这里改 1, 同时把 MISSION_ENABLE 改 0 */
-#define IMU_TURN_DEMO_DEG  180    /* 演示转多少度: 90 或 180 或 -90 或 -180 (v7 自动适应)  */
-#define IMU_TURN_DEMO_BACK  1    /* 1 = 转完再【反向】转同样角度 (验证反方向 + 从非零角度起步) */
 
-#if IMU_TURN_DEMO
-static void App_ImuTurnDemo(void)
-{
-    static uint8_t  step = 0;
-    static uint32_t t0   = 0;
-
-    if (!app_run)                              /* 停止 -> 演示复位 */
-    {
-        step = 0;
-        return;
-    }
-
-    switch (step)
-    {
-    case 0:                                    /* 起步: 原地左转 IMU_TURN_DEMO_DEG 度 */
-        if (!ImuTurn_IsBusy() && (ImuTurn_TurnDeg(IMU_TURN_DEMO_DEG, 0) == 0))
-        {
-            printf("TURN1 start: yaw=%d a=%d\r\n", (int)ImuTurn_GetYaw(), (int)ImuTurn_GetDecel());
-            step = 1;
-        }
-        break;
-
-    case 1:                                    /* 第一转到位 */
-        if (imu_turn_done)
-        {
-            imu_turn_done = 0;
-            /* 台架数据: 结束原因(0=到位 3=超时 4=越走越远) / 目标 / 落点 / 落点误差 */
-            printf("TURN1 done: reason=%d target=%d yaw=%d err=%d a=%d pulse=%d\r\n",
-                   ImuTurn_GetDoneReason(), (int)ImuTurn_GetTarget(),
-                   (int)ImuTurn_GetYaw(), (int)ImuTurn_GetDiff(),
-                   (int)ImuTurn_GetDecel(), ImuTurn_GetPulseCount());
-#if IMU_TURN_DEMO_BACK
-            /* 再【反向】转同样角度: 这次起点是个非零角度, 用来验证"任意角度起步 + 反向" */
-            if (!ImuTurn_IsBusy() && (ImuTurn_TurnDeg(-IMU_TURN_DEMO_DEG, 0) == 0))
-            {
-                printf("TURN2 start: yaw=%d a=%d\r\n", (int)ImuTurn_GetYaw(), (int)ImuTurn_GetDecel());
-                step = 2;
-            }
-#else
-            t0 = Get_Time();
-            ImuTurn_HoldAbs(ImuTurn_GetYaw(), 0);
-            step = 3;
-#endif
-        }
-        break;
-
-#if IMU_TURN_DEMO_BACK
-    case 2:                                    /* 第二转(反向)到位 -> 原地锁角 2s */
-        if (imu_turn_done)
-        {
-            imu_turn_done = 0;
-            printf("TURN2 done: reason=%d target=%d yaw=%d err=%d a=%d pulse=%d\r\n",
-                   ImuTurn_GetDoneReason(), (int)ImuTurn_GetTarget(),
-                   (int)ImuTurn_GetYaw(), (int)ImuTurn_GetDiff(),
-                   (int)ImuTurn_GetDecel(), ImuTurn_GetPulseCount());
-            t0 = Get_Time();
-            ImuTurn_HoldAbs(ImuTurn_GetYaw(), 0);   /* 0 = 原地锁角, 车轮不转 */
-            step = 3;
-        }
-        break;
-#endif
-
-    case 3:                                    /* 保持 2s -> 停车 */
-        if ((Get_Time() - t0) >= 2000)
-        {
-            ImuTurn_Stop();
-            step = 4;
-        }
-        break;
-
-    default:
-        break;
-    }
-}
-#endif
-
-/* 开环测试步骤: {A, B, C, D, 持续时间ms, 阶段名} */
-typedef struct {
-    int16_t  a, b, c, d;
-    uint16_t ms;
-    char     name[10];
-} TestStep;
-
-static const TestStep steps[] = {
-    { 300,   0,   0,   0, 1200, "A FWD"},  {   0,   0,   0,   0, 800, "STOP"},
-    {-300,   0,   0,   0, 1200, "A REV"},  {   0,   0,   0,   0, 800, "STOP"},
-    {   0, 300,   0,   0, 1200, "B FWD"},  {   0,   0,   0,   0, 800, "STOP"},
-    {   0,-300,   0,   0, 1200, "B REV"},  {   0,   0,   0,   0, 800, "STOP"},
-    {   0,   0, 300,   0, 1200, "C FWD"},  {   0,   0,   0,   0, 800, "STOP"},
-    {   0,   0,-300,   0, 1200, "C REV"},  {   0,   0,   0,   0, 800, "STOP"},
-    {   0,   0,   0, 300, 1200, "D FWD"},  {   0,   0,   0,   0, 800, "STOP"},
-    {   0,   0,   0,-300, 1200, "D REV"},  {   0,   0,   0,   0, 800, "STOP"},
-    { 400, 400, 400, 400, 2000, "ALL FWD"},
-    {   0,   0,   0,   0, 1000, "STOP"},
-    {-400,-400,-400,-400, 2000, "ALL REV"},
-    {   0,   0,   0,   0, 1000, "STOP"},
-    {-300, 300,-300, 300, 1500, "TURN L"},      /* 与 Motor.c 的 Turn_left() 一致 */
-    { 300,-300, 300,-300, 1500, "TURN R"},      /* 与 Turn_right() 一致 */
-    {   0,   0,   0,   0, 1500, "STOP"},
-};
-#define STEP_NUM   (sizeof(steps)/sizeof(TestStep))    /* 走完这些步就进闭环 */
-
- 
-static uint8_t  stage    = 0;      /* 当前阶段; >= STEP_NUM 表示已进闭环 */
-static uint32_t stage_ms = 0;      /* 当前阶段已运行时长 */
-
-int PWMA=0,PWMB=0,PWMC=0,PWMD=0;                  /* 4 路 PWM 指令 */
-int A_speed=0,B_speed=0,C_speed=0,D_speed=0;      /* 4 路实测速度(计数/20ms) */
-static int target_speed = TARGET_SPEED;           /* 闭环目标, 电机模式下按键可调 */
-#define TARGET_SPEED_MIN      5
-#define TARGET_SPEED_MAX    200
-#define TARGET_SPEED_STEP     5
-
-int Target_A=TARGET_SPEED,Target_B=TARGET_SPEED,Target_C=TARGET_SPEED,Target_D=TARGET_SPEED;
 
 /*---------------------------------------------------------------------------
  * LCD 行输出 (统一入口, 防止印到屏外)
@@ -754,43 +404,7 @@ static void LCD_results(void)
 #endif /* WORK_FEATURES */
 
 /*---------------------------------------------------------------------------
- * 电机测试模式 (APP_MODE_MOTOR_TEST) 的 LCD —— 台架验证用, 8 行
- *   第1行 阶段+名字 / 第2-3行 PWM A~D / 第4-5行 实测速度 A~D /
- *   第6行 闭环目标 OPEN|CLOSED / 第7行 IMU 航向 / 第8行 授时时间
- *   只写文字影子 (LCD_RowSet), 不碰 SPI —— 推屏在主循环 LCD_RowFlush() 里 1ms/行做
- *-------------------------------------------------------------------------*/
-static void LCD_status(void)
-{
-    char buf[24];
-
-    if (!app_run)               sprintf(buf, "STOP  press S2 ");
-    else if (stage >= STEP_NUM) sprintf(buf, "CLOSED LOOP    ");
-    else                        sprintf(buf, "%2d %-11s", stage + 1, steps[stage].name);
-    lcd_row(LCD_Y(0), buf, app_run ? YELLOW : RED);
-
-    sprintf(buf, "PWM A%4d B%4d", PWMA, PWMB);     /* 15 字符 */
-    lcd_row(LCD_Y(1), buf, WHITE);
-
-    sprintf(buf, "PWM C%4d D%4d", PWMC, PWMD);     /* 15 字符 */
-    lcd_row(LCD_Y(2), buf, WHITE);
-
-    sprintf(buf, "SPD A%4d B%4d", A_speed, B_speed);  /* 15 字符 */
-    lcd_row(LCD_Y(3), buf, GREEN);
-
-    sprintf(buf, "SPD C%4d D%4d", C_speed, D_speed);  /* 15 字符 */
-    lcd_row(LCD_Y(4), buf, GREEN);
-
-    if (stage >= STEP_NUM) sprintf(buf, "TGT %4d CLOSED", Target_A);
-    else                   sprintf(buf, "TGT ---- OPEN  ");
-    lcd_row(LCD_Y(5), buf, CYAN);
-
-    LCD_imu(6);                              /* 第7行 */
-    LCD_clock(7);                            /* 第8行 */
-}
-
-
-/*---------------------------------------------------------------------------
- * 循迹模式 (APP_MODE_TRACK) 的 LCD —— 工作模式 5 行, 不重叠/不超屏
+ * 循迹 LCD —— 工作模式 5 行, 不重叠/不超屏
  *   R_STEP  第1行 状态 + 基速: STOP press S2 / LOST nnn(丢线) / Mxx 步名 子状态 Bxxx
  *   R_PWM   第2行 左右轮 PWM
  *   R_TRACK 第3行 P 质心(0~700, 中心350) E 误差(负 = 线偏左)
@@ -907,21 +521,15 @@ void APP_Task_5ms(void)
         if (ImuTurn_JustFinished())          /* 刚结束: 循迹清状态, 下一拍自然接管 */
         {
             Track_Reset();
-            imu_turn_done = 1;
         }
         return;
     }
 
-    /* 驱动闸门: 跟着 app_run 走 —— 没开始时也照读灰度刷屏, 只是不驱动电机 (台架标定用:
-     * 手推车 / 拿黑线挡探头时, 屏上 8 路点位 / X / H / N 都实时变, 车不动)。
-     * ★ 必须放在 Mission 分支【前面】: 状态机接管后也要保证 drive_en 已经打开,
-     *   否则 Mission_Run() 里 MS_TRACK -> Track_Run() -> track_output() 全被闸门挡掉,
-     *   现象就是"按 S2 后屏上 L/R 数字在跳、车不走"。(2026-10-06 修)
-     *   开关状态变了才切, 不每拍写寄存器 */
-    if (app_mode == APP_MODE_TRACK)
+    /* 驱动闸门: 没按 S2 时也照读灰度刷屏, 只是不驱动电机 (台架手推车标定用)。
+     * ★ 必须在 Mission 分支前面: 否则状态机接管后判定被闸门挡掉 -> 按 S2 后屏在跳、车不走 */
     {
         static int drive_last = -1;
-        if (drive_last != app_run)
+        if (drive_last != app_run)              /* 开关状态变了才切, 不每拍写寄存器 */
         {
             Track_SetDrive(app_run ? 1 : 0);
             drive_last = app_run;
@@ -937,7 +545,7 @@ void APP_Task_5ms(void)
     }
 #endif
 
-    if (app_mode == APP_MODE_TRACK) Track_Run();    /* 没开任务状态机 = 纯循迹 */
+    Track_Run();                                    /* 没开任务状态机 = 纯循迹 */
 }
 
 /*---------------------------------------------------------------------------
@@ -964,10 +572,10 @@ void APP_Task_10ms(void)
 
         if (app_run)
         {
-            if (app_mode == APP_MODE_TRACK) Track_Reset();  /* 清 PID / 丢线计时 */
+            Track_Reset();                                   /* 清丢线计时 / PD 历史 */
             Motor_Enable();                                  /* STBY 使能 */
 #if MISSION_ENABLE
-            if (app_mode == APP_MODE_TRACK) Mission_Start(); /* 按路线表开跑 */
+            Mission_Start();                                 /* 按路线表开跑 */
 #endif
 #if WORK_FEATURES
             Results_Clear();                                 /* 新任务开始: 清上一次的房间结果 */
@@ -980,7 +588,6 @@ void APP_Task_10ms(void)
 #endif
             ImuTurn_Stop();                                  /* 急停: 转向/保向一起停 */
             Motor_Stop();                                    /* 输出清零 + 方向脚复位 */
-            PWMA = PWMB = PWMC = PWMD = 0;                    /* 屏上同步归零 */
         }
         /* 这里刻意不发串口: 9600 下发一行日志要 20~40ms, 会把 5ms 循迹节拍卡住 */
     }
@@ -988,102 +595,24 @@ void APP_Task_10ms(void)
     /* ---------------- 长按: 加速一档 ---------------- */
     if (ev & KEY_EV_ACCEL)
     {
-        if (app_mode == APP_MODE_TRACK)
-        {
-            Track_StepSpeed(1);                              /* 150~900, 到顶回绕到 150 */
-        }
-        else
-        {
-            target_speed += TARGET_SPEED_STEP;
-            if (target_speed > TARGET_SPEED_MAX) target_speed = TARGET_SPEED_MIN;
-            Target_A = Target_B = Target_C = Target_D = target_speed;
-        }
+        Track_StepSpeed(1);                                  /* 150~900, 到顶回绕到 150 */
     }
 }
 
 /*---------------------------------------------------------------------------
- * 20ms 任务: 编码器采样 + 闭环速度环
+ * 20ms 任务: IMU 姿态帧解析 (消费环形缓冲, 解析 0x7E 0x23 帧)
  *-------------------------------------------------------------------------*/
 void APP_Task_20ms(void)
 {
-    IMU_Process();                           /* IMU: 消费环形缓冲, 解析 0x7E 0x23 帧 */
-    Encoder_Update();                        /* 换出 4 路 20ms 计数值 */
-
-    A_speed = Motor_Get_Encoder_A();
-    B_speed = Motor_Get_Encoder_B();
-    C_speed = Motor_Get_Encoder_C();
-    D_speed = Motor_Get_Encoder_D();
-
-    if (!app_run)
-    {
-        return;                              /* 停止状态: 只采样编码器, 不写 PWM */
-    }
-
-    if (ImuTurn_IsBusy())
-    {
-        return;                              /* IMU 转向/保向中: 电机归它, 这里不写 PWM */
-    }
-
-    if (app_mode != APP_MODE_MOTOR_TEST)
-    {
-        return;                              /* 循迹模式: PWM 由 Track_Run() 直接写, 这里不插手 */
-    }
-
-    if (stage >= STEP_NUM)                   /* 闭环阶段: 4 路独立速度环 */
-    {
-        PWMA = Velocity_A(Target_A, A_speed);
-        PWMB = Velocity_B(Target_B, B_speed);
-        PWMC = Velocity_C(Target_C, C_speed);
-        PWMD = Velocity_D(Target_D, D_speed);
-    }
-    /* 开环阶段 PWMA~PWMD 由 100ms 任务按步骤表写入 */
-
-    Motor_PWM_Front(PWMA, PWMB);
-    Motor_PWM_Back(PWMC, PWMD);
+    IMU_Process();
 }
 
 /*---------------------------------------------------------------------------
- * 100ms 任务: 测试阶段推进 + 写 LCD 文字影子 (真正推屏在主循环 LCD_RowFlush())
+ * 100ms 任务: 写 LCD 文字影子 (真正推屏在主循环 LCD_RowFlush())
  *-------------------------------------------------------------------------*/
 void APP_Task_100ms(void)
 {
-#if IMU_TURN_DEMO
-    App_ImuTurnDemo();                       /* 演示: 需把 IMU_TURN_DEMO 改成 1 */
-#endif
-
-    if (app_mode == APP_MODE_TRACK)
-    {
-        LCD_track();
-        return;
-    }
-
-    if (!app_run)
-    {
-        LCD_status();                        /* 停止状态: 不推进阶段, 只刷屏 */
-        return;
-    }
-
-    if (stage < STEP_NUM)
-    {
-        PWMA = steps[stage].a;
-        PWMB = steps[stage].b;
-        PWMC = steps[stage].c;
-        PWMD = steps[stage].d;
-
-        stage_ms += 100;
-        if (stage_ms >= steps[stage].ms)
-        {
-            stage_ms = 0;
-            stage++;                          /* 进入下一步 */
-            if (stage >= STEP_NUM)            /* 开环全部走完 -> 清 PID 状态, 进闭环 */
-            {
-                PWMA = PWMB = PWMC = PWMD = 0;
-                Motor_Stop();
-                printf("---- open loop done, closed loop ON (target=%d) ----\r\n", target_speed);
-            }
-        }
-    }
-    LCD_status();
+    LCD_track();
 }
 
 /*---------------------------------------------------------------------------
@@ -1117,13 +646,6 @@ void APP_Task_1000ms(void)
         }
     }
 
-//    if (stage >= STEP_NUM)
-//        printf("CLOSED  tgt=%d  spd=%d/%d/%d/%d  pwm=%d/%d/%d/%d\r\n",
-//               Target_A, A_speed, B_speed, C_speed, D_speed, PWMA, PWMB, PWMC, PWMD);
-//    else
-//        printf("STEP %2d %-8s pwm=%d/%d/%d/%d  spd=%d/%d/%d/%d\r\n",
-//               stage + 1, steps[stage].name, PWMA, PWMB, PWMC, PWMD,
-//               A_speed, B_speed, C_speed, D_speed);
 }
 
 /*---------------------------------------------------------------------------
@@ -1136,7 +658,6 @@ static void System_Init(void)
     Motor_Stop();
     Motor_Enable();                         /* TB6612 STBY = 1 使能 */
 
-    Encoder_Init();                         /* 打开 8 个编码器脚的中断 */
     Key_Init();                             /* 板载按键 S1/S2 调速 */
     IMU_Init();                             /* IMU: UART1(PA8/PA9) RX 中断 + RX 上拉 */
     ImuTurn_Init();                         /* IMU 转向/保向层复位 */
@@ -1161,29 +682,15 @@ static void System_Init(void)
     LCD_FillFast(0, 0, LCD_W, LCD_H, BLACK);
     LCD_DrawRectangle(0, 0, LCD_W - 1, LCD_H - 1, WHITE);
 
-    if (app_mode == APP_MODE_TRACK)
-    {
-        Track_Init();                       /* 循迹 PID 初始化 */
+    Track_Init();                           /* 循迹 PD 初始化 */
 #if WORK_FEATURES
-        g_bat_v   = Bat_ReadAvg();          /* 上电先读一次电量 (结果区电量行) */
-        g_bat_pct = Bat_ToPercent(g_bat_v);
+    g_bat_v   = Bat_ReadAvg();              /* 上电先读一次电量 (结果区电量行) */
+    g_bat_pct = Bat_ToPercent(g_bat_v);
 #endif
-        printf("\r\n==== TRACK mode: AuroraT8 (I2C0 PA0/PA1), 5ms loop ====\r\n");
-        printf("KEY S2/PB21: click = start/stop, long press = speed up\r\n");
-        printf("TIME: I2C1 PA30(SDA)/PA29(SCL) -> ESP32-S2 @0x42 400kHz, calib %us\r\n",
-               (unsigned int)(TIMESYNC_CALIB_MS / 1000u));
-    }
-    else
-    {
-#if SKIP_OPEN_LOOP
-        stage = STEP_NUM;                   /* 直接进闭环, 跳过开环自检 */
-        printf("\r\n==== Motor test (DEBUG: skip open loop, CLOSED LOOP from boot) ====\r\n");
-#else
-        printf("\r\n==== Motor test (TB6612, 4 wheels, open loop -> closed loop) ====\r\n");
-#endif
-        printf("A=LF PA12/PB19/PB20  B=RF PA13/PB4/PB5  C=RB PA17/PB6/PB7  D=LB PA7/PB12/PB13\r\n");
-        printf("STBY=PB0  encoder 20ms  target=%d\r\n", target_speed);
-    }
+    printf("\r\n==== TRACK mode: AuroraT8 (I2C0 PA0/PA1), 5ms loop ====\r\n");
+    printf("KEY S2/PB21: click = start/stop, long press = speed up\r\n");
+    printf("TIME: I2C1 PA30(SDA)/PA29(SCL) -> ESP32-S2 @0x42 400kHz, calib %us\r\n",
+           (unsigned int)(TIMESYNC_CALIB_MS / 1000u));
 }
 
 int main(void)
@@ -1261,7 +768,6 @@ void Mission_OnDone(void)
     /* 收工即停: 跑完最后一步后不要再落回"纯循迹"自己往前跑 (MISSION_DEBUG_STEPS 限流时同理) */
     app_run = 0;
     Motor_Stop();
-    PWMA = PWMB = PWMC = PWMD = 0;
 #if WORK_FEATURES
     g_task_done = 1;                                /* 屏第 1 行提示"任务完成" (结果不清) */
     {

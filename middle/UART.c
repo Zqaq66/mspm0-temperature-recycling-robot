@@ -5,7 +5,6 @@
 char time_buf[20];  // 存储接收的时间戳字符串
 uint8_t time_idx = 0;        // 当前接收位置索引
 uint8_t time_received = 0;   // 接收完成标志（0：未完成；1：已完成）
-unsigned int uart_timeout_cnt = 0;  // 超时计数器
 /*串口初始化*/
 void UART_Init(void)
 {
@@ -17,22 +16,6 @@ void UART_send_char(char ch)
 {
 	while(DL_UART_isBusy(UART0)==true);
 	DL_UART_Main_transmitData(UART0,ch);
-}
-/*串口发送字符串*/
-void UART_send_string(char *str)
-{
-	while(*str!=0&&str!=0)
-	{
-		UART_send_char(*str++);
-	}
-}
-/*串口发送两位数*/
-void UART_send_Data(int tp)
-{
-	while(DL_UART_isBusy(UART0)==true);
-	DL_UART_Main_transmitData(UART0,tp/10+'0');
-	while(DL_UART_isBusy(UART0)==true);
-	DL_UART_Main_transmitData(UART0,tp%10+'0');
 }
 //串口的中断服务函数
 void UART_0_INST_IRQHandler(void)

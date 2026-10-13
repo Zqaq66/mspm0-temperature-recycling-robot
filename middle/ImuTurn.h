@@ -29,7 +29,7 @@
  *   用 ImuTurn_IsBusy() 做唯一判据, 工程里已经接好:
  *     - 5ms 任务: 忙 -> 调 ImuTurn_Update() 且不跑 Track_Run(); 结束那一拍自动
  *       Track_Reset(), 循迹下一拍接管 (不会带着旧 PID/丢线状态)
- *     - 20ms 任务: 忙 -> 直接 return, 不写 PWM (电机测试的开环/闭环也让出)
+ *     - 20ms 任务: 忙 -> 不写 PWM
  *     - 单击 S2 停止 (app_run=0) -> ImuTurn_Stop(), 电机立刻停
  *     - 转向/保向期间不读灰度/I2C, 不和循迹抢 I2C 总线
  *   另外: 启动前会检查 IMU 有没有在收数据, 没有就返回 -1 不启动;
