@@ -488,10 +488,11 @@ void Track_Run(void)
             {
                 track_white[i] = (uint8_t)(calib_sum[i] / CALIB_FRAMES);
 #if ADAPT_ONLINE
-                /* 黑参考先给保守初值 (白底 + 2*margin): 阈值先等价于旧的"白底+margin",
-                 * 真正看到黑线后再自己收敛到实测反差 */
+                /* 黑参考初值: m = 5*margin/3 -> 进入门槛 = 白底 + margin, 与旧的固定阈值完全一致。
+                 * 宁低勿高: 初值太高会一开机就看不见线, 那就永远学不到真正的黑参考了。
+                 * 看到黑线后自己收敛到实测反差, 门槛再跟着反差走。 */
                 {
-                    int b = (int)track_white[i] + 2 * ADAPT_MARGIN;
+                    int b = (int)track_white[i] + (5 * ADAPT_MARGIN) / 3;
                     track_black[i] = (uint8_t)((b > 255) ? 255 : b);
                 }
 #endif
