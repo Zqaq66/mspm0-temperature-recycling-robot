@@ -78,7 +78,8 @@ void Track_StepSpeed(int dir);      /* dir>0 加速一档, dir<0 减速一档 */
  * ★ Track_Detect(0) 关掉判定时 (转向/找线全过程), 一切事件作废并清零。 */
 #define CORNER_EDGE_BLACK_REQ  3      /* 普通弯: 外侧连续压线路数 (线贴到这个宽度才算) */
 #define CORNER_CENTER_MASK  0x3C      /* bit2~5 = "中心那几路" (1=白, 0=压线) */
-#define CORNER_CONFIRM_FRAMES  5      /* 中心全白 + 外侧展宽 连续这么多帧才算弯 (5ms/帧) */
+#define CORNER_WIN_FRAMES     12      /* 外侧展宽后, 中心持续没线这么多帧才算弯 (5ms/帧 -> 60ms) */
+#define CORNER_LOST_MS       100      /* 或: 线整段丢了连续这么久, 也算弯 (方向取最后看到线的那侧) */
 #define LINE_MAX_BLACK        3       /* "细线"判据: 压线路数 <= 它 (找线/回阵列正中都用) */
 #ifndef TRACK_SUPPRESS_MS
 #define TRACK_SUPPRESS_MS     400     /* 转向收工后屏蔽判定的时长 (0 = 不屏蔽) */

@@ -168,7 +168,7 @@ static uint8_t det_room_cnt  = 0, det_room_rep  = 0, det_room_ev  = 0;
 /* 事件层状态: 普通弯判定 + 判定开关 */
 static uint8_t  cn_ev     = 0;   /* 普通弯 边沿事件 (等 Track_TakeCorner() 取走) */
 static uint8_t  cn_hold   = 0;   /* 已确认普通弯: 丢线找回让位给状态机的"前移+原地转" */
-static uint8_t  cn_cnt    = 0;   /* 普通弯 连续帧计数 */
+static uint8_t  cn_win    = 0;   /* >0 = 普通弯判定窗口还剩几帧 */
 static int8_t   cn_side   = 0;   /* 候选弯在哪侧: +1 右 / -1 左 */
 static uint8_t  det_en    = 1;   /* 1 = 允许事件判定 (转向/找线全过程由状态机关掉) */
 static uint32_t sup_until = 0;   /* 屏蔽判定到什么时候 (ms); 0 = 不屏蔽 */
@@ -348,7 +348,7 @@ void Track_Run(void)
         track_cross = track_room = 0;
         track_nblack = 0;
         track_cross_cnt = 0;
-        cn_cnt = 0; cn_side = 0; cn_hold = 0;      /* 普通弯判定从头开始 */
+        cn_win = 0; cn_side = 0; cn_hold = 0;      /* 普通弯判定从头开始 */
         cn_ev = 0;
         track_corner = track_corner_side = 0;
         bits_latch = 0xFF;                          /* 滞回/中值历史清零重来 */
@@ -563,46 +563,56 @@ void Track_Run(void)
             track_room = (det_room_cnt >= POINT_CONFIRM_FRAMES) ? 1 : 0;
         }
 
-        /* ------ 2c. 普通弯 判定 (2026-10-13 简化) ------
-         * 只报"线从阵列侧面整段离开了"这一件事: 外侧连续 CORNER_EDGE_BLACK_REQ 路压线,
-         * 且中心那几路全白, 连续 CORNER_CONFIRM_FRAMES 帧。
-         * ★ 语义不再在这里判: 丁字口横杠/停车线/房间都是"大面积黑"(nb >= ROOM_MIN_BLACK,
-         *   上面那段), 统一当 EV_BLACK 报给状态机, 由路线表的"期望"去解释。 */
+        /* ------ 2c. 普通弯 判定 (EV_CORNER) ------
+         * ★ 必须"先开窗、再数帧", 不能当拍同时判 —— "外侧连续 3 路"(bit5~7 或 bit0~2)
+         *   和 "中心那几路"(bit2~5) 本身就有重叠位 (bit2/bit5), 同拍判定永远不成立。
+         * 两个触发, 二选一 (都要求不在大面积黑里):
+         *   ① 外侧连续 CORNER_EDGE_BLACK_REQ 路压线 -> 开窗; 窗口里中心一直没黑 -> 弯
+         *      (线从中心"滑"到边上再出去)
+         *   ② 线整段丢了 (连续 CORNER_LOST_MS) -> 弯, 方向取最后看到线的那一侧
+         *      (线"断"着出去的: 传感器已经越过弯心)
+         * ★ 是不是路口不在这里判: 丁字口横杠/停车线都是"大面积黑"(上面那段), 由路线表解释。 */
         {
-            int center_white = ((bits & CORNER_CENTER_MASK) == CORNER_CENTER_MASK);
-            int lrun = 0, rrun = 0, cand = 0, i3;
+            int lrun = 0, rrun = 0, edge_side = 0, i3;
+            int center_black = ((bits & CORNER_CENTER_MASK) != CORNER_CENTER_MASK);
+            int lost_long    = (den == 0) && ((now - last_time) >= CORNER_LOST_MS);
 
             for (i3 = 0; i3 < 8; i3++) { if (!((bits >> i3) & 1)) lrun++; else break; }
             for (i3 = 0; i3 < 8; i3++) { if (!((bits >> (7 - i3)) & 1)) rrun++; else break; }
+            if      (lrun >= CORNER_EDGE_BLACK_REQ && rrun < CORNER_EDGE_BLACK_REQ) edge_side = -1;
+            else if (rrun >= CORNER_EDGE_BLACK_REQ && lrun < CORNER_EDGE_BLACK_REQ) edge_side = +1;
 
-            /* 大面积黑时不当弯 (那是口子/停车线); 中心还得是白的 (线真的走了) */
-            if ((nb < ROOM_MIN_BLACK) && center_white)
+            if ((!det_en) || ((int32_t)(sup_until - now) > 0))    /* 转向/找线中 或 刚收工: 不判 */
             {
-                if      (lrun >= CORNER_EDGE_BLACK_REQ && rrun < CORNER_EDGE_BLACK_REQ) cand = -1;
-                else if (rrun >= CORNER_EDGE_BLACK_REQ && lrun < CORNER_EDGE_BLACK_REQ) cand = +1;
-            }
-
-            if ((!det_en) || ((int32_t)(sup_until - now) > 0))   /* 转向/找线中 或 刚收工: 不判 */
-            {
-                cn_cnt = 0; cn_side = 0; cn_ev = 0;
+                cn_win = 0; cn_side = 0; cn_ev = 0;
                 track_corner = 0;
             }
-            else if (cand != 0)
+            else if (cn_win > 0)                                  /* 窗口里: 只看中心还有没有线 */
             {
-                if (cn_side == cand) { if (cn_cnt < 250) cn_cnt++; }
-                else                 { cn_side = (int8_t)cand; cn_cnt = 1; }
-
-                if (cn_cnt >= CORNER_CONFIRM_FRAMES)
+                if (center_black || (nb >= ROOM_MIN_BLACK)) { cn_win = 0; }   /* 线回来了/大面积黑: 不是弯 */
+                else if (--cn_win == 0)                           /* 窗口用完中心还是没线 -> 普通弯 */
                 {
                     track_corner      = 1;
-                    track_corner_side = (int)cand;
-                    cn_ev             = 1;              /* 边沿事件, 等 Track_TakeCorner() 取走 */
-                    cn_hold           = 1;              /* 丢线找回让位 (见下面 den==0 分支) */
+                    track_corner_side = (int)cn_side;
+                    cn_ev             = 1;                        /* 边沿事件, 等 Track_TakeCorner() 取走 */
+                    cn_hold           = 1;                        /* 丢线找回让位 (见下面 den==0 分支) */
                 }
+            }
+            else if ((edge_side != 0) && (nb < ROOM_MIN_BLACK))   /* 触发①: 线滑到边上 */
+            {
+                cn_win  = CORNER_WIN_FRAMES;
+                cn_side = (int8_t)edge_side;
+            }
+            else if (lost_long)                                   /* 触发②: 线整段丢了 */
+            {
+                track_corner      = 1;
+                track_corner_side = (last_side <= 0) ? -1 : +1;
+                cn_ev             = 1;
+                cn_hold           = 1;
             }
             else
             {
-                cn_cnt = 0; cn_side = 0;
+                cn_win = 0;
                 track_corner = 0;
             }
         }
@@ -841,7 +851,7 @@ void Track_SetDrive(int on)
  *-------------------------------------------------------------------------*/
 static void track_det_clear(void)
 {
-    cn_cnt = 0; cn_side = 0; cn_ev = 0;
+    cn_win = 0; cn_side = 0; cn_ev = 0;
     track_corner = 0;
 }
 
