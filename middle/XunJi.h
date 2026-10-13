@@ -134,8 +134,9 @@ int  Track_TakeCorner(void);    /* 边沿: 确认普通弯 -> 1 (读后自动清) */
 void Track_Stop(void);         /* 停车: 左右 PWM 0 + 短路制动 (状态机用) */
 void Track_SetDrive(int on);   /* 0 = 观察模式: 照读传感器/刷屏, 但不驱动电机 (台架标定用) */
 extern uint8_t track_raw[8];     /* 每路原始值 (0~255, 越大越黑) —— 标定阈值时看这个 */
-extern uint8_t track_white[8];   /* 每路白底基线 (上电/手动标定出来的) */
-extern uint8_t track_thr[8];     /* 每路当前生效阈值 (= 白底基线 + ADAPT_MARGIN) */
+extern uint8_t track_white[8];   /* 每路白底基线 (上电标定 + 在线慢速跟踪) */
+extern uint8_t track_black[8];   /* 每路黑参考 (在线学习出来的实测黑线值) */
+extern uint8_t track_thr[8];     /* 每路当前生效阈值 (= 滞回上沿; 屏显/找线都用它) */
 void Track_CalibWhite(void);     /* 重新标定白底基线 (车停着且 8 路都在白底上时调) */
 
 /* ---- 找线 (2026-10-06): 转弯落点不确定, 状态机转完要闭环找回线 ------------------

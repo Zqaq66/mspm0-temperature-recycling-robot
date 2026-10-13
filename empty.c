@@ -65,8 +65,9 @@
  *
  * ---- 主要开关 (都能用 Keil Misc Controls 加 -Dxxx=1 覆盖) ----
  *   MISSION_ENABLE       1 = 按路线表跑 / 0 = 纯循迹
- *   WORK_FEATURES        1 = 房间环节 (测温/电量/屏显结果区/LORA/语音)
- *   LCD_DEBUG            1 = 屏第 6~10 行显示标定/诊断 (与 WORK_FEATURES 抢屏, 二选一)
+ *   WORK_FEATURES        1 = 房间环节 (测温/电量/LORA/语音)
+ *   LCD_RESULTS          1 = 屏第 6~10 行显示房间结果区 (0 = 标定/诊断行, 调阈值时用)
+ *   LCD_DEBUG            1 = 允许显示标定/诊断行 (要 LCD_RESULTS=0 才看得到)
  *   MISSION_DEBUG_STEPS  (Mission.c) N>0 只跑前 N 步, 台架分段验路线
  *   调参入口都在各模块 .c/.h 顶部
  *===========================================================================*/
@@ -97,13 +98,19 @@
  *    所以标定探头/路口/房间时不用按键, 手推车或拿黑线挡探头屏上就实时变 */
 #define MISSION_ENABLE   1
 
-/* ---- 题目功能: 房间测温环节 (语音 / 测温 / 电量 / 屏显结果区 / LORA 上报) ----
- * 1 = 开 (默认): Mission_OnWork() 里做完整流程; 屏第 6~10 行显示 [电量 + 4 个房间结果]
- * 0 = 关: 屏第 6~10 行还给 LCD_DEBUG 的标定/诊断行 (台架调循迹/路口时用)
- * ★ WORK_FEATURES 和 LCD_DEBUG 抢屏第 6~10 行 -> 只能二选一 */
+/* ---- 题目功能: 房间测温环节 (语音 / 测温 / 电量 / LORA 上报) ----
+ * 1 = 开 (默认): Mission_OnWork() 做完整流程; 0 = 关 (只打一行串口日志) */
 #ifndef WORK_FEATURES
 #define WORK_FEATURES   1
 #endif
+
+/* ---- 屏第 6~10 行显示哪一套 (两套都要这片屏, 只能二选一) ----
+ * 1 = 房间结果区: 电量 + 4 个房间的温度/时间 (题目要求)
+ * 0 = 标定/诊断行: 8 路点位 + 判定 / X H N T F / V RX E / 8 路原始值 (调阈值/路口用) */
+#ifndef LCD_RESULTS
+#define LCD_RESULTS     0
+#endif
+#define LCD_SHOW_RESULT (WORK_FEATURES && LCD_RESULTS)
 
 /* 电池电压: ADC0/PA27, 板上 1/4 分压 -> Vbat = Vpin * BAT_DIV_RATIO
  * 电量% = (Vbat - BAT_EMPTY_V) / (BAT_FULL_V - BAT_EMPTY_V) * 100 (题目给的参考公式) */
@@ -279,7 +286,9 @@ typedef struct
     uint8_t hh, mm, ss;     /* 测量时刻 时:分:秒 */
 } RoomResult;
 
+#if LCD_SHOW_RESULT
 static RoomResult g_room[5];          /* 只用 1..4 (下标 = 房间号) */
+#endif
 static float      g_bat_v   = 0.0f;   /* 最近一次读到的电池电压 (结果区第 1 行显示) */
 static uint8_t    g_bat_pct = 0;
 static uint8_t    g_task_done = 0;    /* 1 = 整表跑完 (屏第 1 行提示"任务完成") */
@@ -287,8 +296,10 @@ static uint8_t    g_task_done = 0;    /* 1 = 整表跑完 (屏第 1 行提示"任务完成") 
 /* 清空结果 —— 在下一次任务开始时调 (满足"数据中途不得清除") */
 static void Results_Clear(void)
 {
+#if LCD_SHOW_RESULT
     int i;
     for (i = 0; i < 5; i++) { g_room[i].valid = 0; g_room[i].time_ok = 0; }
+#endif
     g_bat_v     = 0.0f;
     g_bat_pct   = 0;
     g_task_done = 0;
@@ -371,6 +382,7 @@ static void fmt_volt(char *out, float v)
     sprintf(out, "%d.%02dV", mv / 100, mv % 100);
 }
 
+#if LCD_SHOW_RESULT
 /* 房间结果区: 第 6 行 = 电量; 第 7~10 行 = 4 个房间 (题目要求: 中途不清) */
 static void LCD_results(void)
 {
@@ -401,6 +413,7 @@ static void LCD_results(void)
         }
     }
 }
+#endif /* LCD_SHOW_RESULT */
 #endif /* WORK_FEATURES */
 
 /*---------------------------------------------------------------------------
@@ -445,11 +458,11 @@ static void LCD_track(void)
     LCD_imu(R_IMU);                          /* 第4行: 航向 (转向中 + 剩余角) */
     LCD_clock(R_TIME);                       /* 第5行: 授时时间 (未同步不显示) */
 
-#if WORK_FEATURES
+#if LCD_SHOW_RESULT
     LCD_results();                           /* 第 6~10 行: 电量 + 4 个房间结果 (题目要求) */
 #endif
 
-#if LCD_DEBUG && !WORK_FEATURES
+#if LCD_DEBUG && !LCD_SHOW_RESULT
     {   /* 以下 3 行只在 LCD_DEBUG=1 时显示: 标定传感器 / 查路口检测 / 查实时性 */
         static uint16_t loop_max = 0;
         static uint32_t last_rx  = 0;
@@ -735,6 +748,7 @@ void Mission_OnWork(int room)
     g_bat_v   = bv;
     g_bat_pct = pct;
 
+#if LCD_SHOW_RESULT
     if ((room >= 1) && (room <= 4))                 /* 记录到结果区 (中途不清) */
     {
         g_room[room].valid   = 1;
@@ -749,6 +763,7 @@ void Mission_OnWork(int room)
             g_room[room].ss = dt.sec;
         }
     }
+#endif
 
     /* LORA 上报 (printf 出口 = LORA 口 UART3/PB2, 9600); 浮点用整数格式化 */
     fmt_temp(ts, temp);

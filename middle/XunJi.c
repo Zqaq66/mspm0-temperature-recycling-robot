@@ -67,6 +67,35 @@
 #define TRACK_SENSOR_FLIP       0       /* 1 = 8 路左右镜像 */
 #define TRACK_LR_SWAP           0       /* 1 = 左右输出对调 */
 
+/* ---- 在线自适应双参考阈值 (污渍/光照漂移时不用重新上电标定) ----
+ *   每路维护两个慢速跟踪值: 白底 white[i] 与 黑参考 black[i];
+ *   压线阈值取二者之间 (自适应反差), 外面再套一层滞回 + 3 帧中值。
+ *   护栏: 只在"细线帧"(压线路数 <= ADAPT_THIN_NB) 学习; 白底只更新"本路判白且
+ *         左右都不挨着黑线"的通道 -> 黑线/房间/宽黑不会污染基线。 */
+#ifndef ADAPT_ONLINE
+#define ADAPT_ONLINE      1     /* 1 = 在线双参考自适应; 0 = 退回旧的"白底 + 固定 ADAPT_MARGIN" */
+#endif
+#ifndef ADAPT_IIR_SHIFT
+#define ADAPT_IIR_SHIFT   6     /* 参考值跟踪强度 (5ms/拍, >>6 -> 时间常数约 0.3s) */
+#endif
+#ifndef ADAPT_MIN_MARGIN
+#define ADAPT_MIN_MARGIN  25    /* 反差下限: black-white 至少留这么大, 防低反差时阈值塌到白底 */
+#endif
+#ifndef ADAPT_MAX_MARGIN
+#define ADAPT_MAX_MARGIN 200    /* 反差上限 (保护) */
+#endif
+#ifndef HYST_ENABLE
+#define HYST_ENABLE       1     /* 1 = 压线判定带滞回 (进入 hi / 退出 lo), 消除阈值附近闪动 */
+#endif
+#ifndef MEDIAN_ENABLE
+#define MEDIAN_ENABLE     1     /* 1 = 压线结果过 3 帧中值 (单帧毛刺直接滤掉) */
+#endif
+#ifndef ADAPT_WHITE_SKIP_NEAR
+#define ADAPT_WHITE_SKIP_NEAR 1 /* 1 = 挨着黑线的"白"路不更新白底 (防把线边溢出学进基线);
+                                 * 0 = 所有判白的路都学 (污渍紧贴黑线时更激进) */
+#endif
+#define ADAPT_THIN_NB     3     /* "细线帧"的最大压线路数 (房间/宽黑不参与学习) */
+
 #define CENTER_POS              350     /* 质心中心 (8 路 -> 3.5 路) */
 #define Q_SCALE                 1024    /* Q10 定点标度 */
 
@@ -123,6 +152,15 @@ uint8_t track_white[8];             /* 每路白底基线 (标定出来的) */
 uint8_t track_thr[8] = { NOISE_THRESHOLD, NOISE_THRESHOLD, NOISE_THRESHOLD, NOISE_THRESHOLD,
                          NOISE_THRESHOLD, NOISE_THRESHOLD, NOISE_THRESHOLD, NOISE_THRESHOLD };
                                     /* 每路当前生效阈值: 标定完成前 = NOISE_THRESHOLD */
+uint8_t track_black[8];             /* 每路黑参考 (在线学习出来的实测黑线值) */
+
+/* 滞回 / 3 帧中值 的内部状态 */
+static uint8_t track_thr_hi[8];     /* 滞回上沿: >= 它立刻判压线 */
+static uint8_t track_thr_lo[8];     /* 滞回下沿: <= 它立刻判放开 */
+static uint8_t bits_latch = 0xFF;   /* 上一拍逐路滞回结果 (bit=1 白) */
+#if MEDIAN_ENABLE
+static uint8_t bits_h1 = 0xFF, bits_h2 = 0xFF;   /* 3 帧中值的前两拍 */
+#endif
 
 /* 检测内部: 去抖计数 / 本帧已报标志 / 待取边沿事件 (只在 Track_Run 里更新) */
 static uint8_t det_cross_cnt = 0, det_cross_rep = 0, det_cross_ev = 0;
@@ -211,7 +249,17 @@ void Track_Init(void)
 
     Track_SetBaseSpeed(TRACK_SPEED_DEFAULT);
 
-    for (i = 0; i < 8; i++) track_thr[i] = NOISE_THRESHOLD;   /* 标定完成前用固定阈值兜底 */
+    for (i = 0; i < 8; i++)             /* 标定完成前: 固定阈值兜底 (此时无滞回) */
+    {
+        track_thr[i]    = NOISE_THRESHOLD;
+        track_thr_hi[i] = NOISE_THRESHOLD;
+        track_thr_lo[i] = NOISE_THRESHOLD;
+        track_black[i]  = 0;
+    }
+    bits_latch = 0xFF;
+#if MEDIAN_ENABLE
+    bits_h1 = bits_h2 = 0xFF;
+#endif
 
     reset_req = 1;
 
@@ -229,6 +277,45 @@ void Track_Init(void)
 void Track_CalibWhite(void)
 {
     calib_req = 1;
+}
+
+#if ADAPT_ONLINE
+/* 一阶 IIR 跟踪: *cur 朝 v 走 1/(1<<ADAPT_IIR_SHIFT); 差距不足一格也走 1, 免得慢漂移追不上 */
+static void iir_step(uint8_t *cur, int v)
+{
+    int d = (v - (int)*cur) / (1 << ADAPT_IIR_SHIFT);
+    if (d == 0 && v != (int)*cur) d = (v > (int)*cur) ? 1 : -1;
+    v = (int)*cur + d;
+    if (v < 0)   v = 0;
+    if (v > 255) v = 255;
+    *cur = (uint8_t)v;
+}
+#endif
+
+/* 由 white/black 算滞回双阈值; 对外 track_thr = 进入黑的门槛 (屏显/找线都用它) */
+static void track_thr_calc(int k)
+{
+    int hi, lo;
+#if ADAPT_ONLINE
+    int m = (int)track_black[k] - (int)track_white[k];
+    if (m < ADAPT_MIN_MARGIN) m = ADAPT_MIN_MARGIN;
+    if (m > ADAPT_MAX_MARGIN) m = ADAPT_MAX_MARGIN;
+    hi = (int)track_white[k] + (m * 3) / 5;
+    lo = (int)track_white[k] + (m * 2) / 5;
+#else
+    hi = (int)track_white[k] + ADAPT_MARGIN;
+    lo = hi;
+#endif
+#if !HYST_ENABLE
+    lo = hi;                            /* 关掉滞回 = 单一门槛 (旧行为) */
+#endif
+    if (hi > 254) hi = 254;
+    if (hi < ADAPT_MIN) hi = ADAPT_MIN;
+    if (lo >= hi) lo = (hi > 1) ? (hi - 1) : 0;
+
+    track_thr_hi[k] = (uint8_t)hi;
+    track_thr_lo[k] = (uint8_t)lo;
+    track_thr[k]    = (uint8_t)hi;
 }
 
 /*---------------------------------------------------------------------------
@@ -270,6 +357,10 @@ void Track_Run(void)
         br_ev = 0; cn_ev = 0;
         track_branch = track_branch_side = 0;
         track_corner = track_corner_side = 0;
+        bits_latch = 0xFF;                          /* 滞回/中值历史清零重来 */
+#if MEDIAN_ENABLE
+        bits_h1 = bits_h2 = 0xFF;
+#endif
     }
 
     /* ------ 0. 标定请求: 重新采白底基线 ------ */
@@ -292,37 +383,95 @@ void Track_Run(void)
         return;
     }
 
-    /* ------ 2. 读值 -> (标定) / 判定 -> 平方加权质心 ------
-     * 阈值是自适应的: v > track_thr[i] 才算压线 (track_thr = 白底基线 + ADAPT_MARGIN)。
-     * 标定没完成时 track_thr[i] = NOISE_THRESHOLD, 就是原来那套固定阈值。 */
-    for (i = 0; i < 8; i++)
+    /* ------ 2. 读值 -> (标定) / 压线判定(滞回 + 中值) -> 平方加权质心 ------
+     * 阈值见 ADAPT_ONLINE: 1 = 在线双参考 (白底/黑参考取中点); 0 = 旧的"白底 + ADAPT_MARGIN"。
+     * 标定没完成时 track_thr_hi/lo = NOISE_THRESHOLD (固定阈值兜底)。 */
     {
+        uint8_t hb = 0xFF;                      /* 本拍逐路滞回结果 (bit=1 白) */
+
+        for (i = 0; i < 8; i++)
+        {
 #if TRACK_SENSOR_FLIP
-        v = data.all_div8[7 - i];
+            v = data.all_div8[7 - i];
 #else
-        v = data.all_div8[i];
+            v = data.all_div8[i];
 #endif
 #if !TRACK_DARK_IS_HIGH
-        v = (uint8_t)(255 - v);
+            v = (uint8_t)(255 - v);
 #endif
-        track_raw[i] = v;                       /* 原始值: 给屏上"8 路原始值"那两行看 */
+            track_raw[i] = v;                       /* 原始值: 给屏上"8 路原始值"那两行看 */
 
-        /* 标定中: 只累加, 不参与质心/压线判定 */
-        if (calibrating)
+            /* 标定中: 只累加, 不参与质心/压线判定 */
+            if (calibrating)
+            {
+                calib_sum[i] += v;
+                continue;
+            }
+
+            /* 滞回: >= hi 立刻压线, <= lo 立刻放开, 中间保持上一拍 (阈值附近不再闪) */
+            {
+                int was_black = ((bits_latch >> i) & 1) ? 0 : 1;
+                int black;
+
+                if      ((int)v >= (int)track_thr_hi[i]) black = 1;
+                else if ((int)v <= (int)track_thr_lo[i]) black = 0;
+                else                                     black = was_black;
+
+                if (!black) hb |= (uint8_t)(1u << i);    /* bit=0 表示该路压线 */
+            }
+        }
+        bits_latch = hb;                                /* 滞回锁存给下一拍 */
+
+#if MEDIAN_ENABLE
+        bits = (uint8_t)((hb & bits_h1) | (bits_h1 & bits_h2) | (hb & bits_h2));  /* 3 帧多数表决 */
+        bits_h2 = bits_h1;
+        bits_h1 = hb;
+#else
+        bits = hb;
+#endif
+
+        /* 平方加权质心: 只累计压线的那几路 (用中值后的 bits, 和判定/屏显一致) */
+        if (!calibrating)
         {
-            calib_sum[i] += v;
-            continue;
+            for (i = 0; i < 8; i++)
+            {
+                uint32_t w;
+                if ((bits >> i) & 1) continue;          /* 白 -> 不参与 */
+                w = (uint32_t)track_raw[i] * (uint32_t)track_raw[i];
+                num += w * (uint32_t)(i * 100);
+                den += w;
+            }
         }
 
-        if (v < track_thr[i]) continue;         /* 白底/噪声 (自适应阈值) */
-
-        bits &= ~(uint8_t)(1u << i);            /* bit=0 表示该路压线 */
-
+#if ADAPT_ONLINE
+        /* 在线学习: 只在"细线帧"更新参考值 (房间/宽黑/转弯时的乱线都不学) */
+        if (!calibrating)
         {
-            uint32_t w = (uint32_t)v * (uint32_t)v;
-            num += w * (uint32_t)(i * 100);
-            den += w;
+            int nb_now = 0, k;
+            for (k = 0; k < 8; k++) if (!((bits >> k) & 1)) nb_now++;
+
+            if (nb_now <= ADAPT_THIN_NB)
+            {
+                for (k = 0; k < 8; k++)
+                {
+                    if (!((bits >> k) & 1))                 /* 判黑 -> 这几路就是线, 学黑参考 */
+                    {
+                        iir_step(&track_black[k], (int)track_raw[k]);
+                    }
+                    else                                    /* 判白 -> 学白底 */
+                    {
+#if ADAPT_WHITE_SKIP_NEAR
+                        int near_l = (k > 0) && !((bits >> (k - 1)) & 1);
+                        int near_r = (k < 7) && !((bits >> (k + 1)) & 1);
+                        if (near_l || near_r) continue; /* 挨着黑线的白路跳过 (防把线边溢出学进白底) */
+#endif
+                        iir_step(&track_white[k], (int)track_raw[k]);
+                    }
+                }
+                for (k = 0; k < 8; k++) track_thr_calc(k);
+            }
         }
+#endif
     }
     track_bits = bits;
     now = Get_Time();
@@ -338,9 +487,20 @@ void Track_Run(void)
             for (i = 0; i < 8; i++)
             {
                 track_white[i] = (uint8_t)(calib_sum[i] / CALIB_FRAMES);
-                track_thr[i]   = (uint8_t)(track_white[i] + ADAPT_MARGIN);
-                if (track_thr[i] < ADAPT_MIN) track_thr[i] = ADAPT_MIN;
+#if ADAPT_ONLINE
+                /* 黑参考先给保守初值 (白底 + 2*margin): 阈值先等价于旧的"白底+margin",
+                 * 真正看到黑线后再自己收敛到实测反差 */
+                {
+                    int b = (int)track_white[i] + 2 * ADAPT_MARGIN;
+                    track_black[i] = (uint8_t)((b > 255) ? 255 : b);
+                }
+#endif
+                track_thr_calc(i);
             }
+            bits_latch = 0xFF;                          /* 滞回/中值历史当成全白 */
+#if MEDIAN_ENABLE
+            bits_h1 = bits_h2 = 0xFF;
+#endif
 
             printf("TRACK calib white=");
             for (i = 0; i < 8; i++) printf("%3u ", (unsigned)track_white[i]);
