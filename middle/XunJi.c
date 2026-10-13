@@ -417,7 +417,7 @@ void Track_Run(void)
                 else if ((int)v <= (int)track_thr_lo[i]) black = 0;
                 else                                     black = was_black;
 
-                if (!black) hb |= (uint8_t)(1u << i);    /* bit=0 表示该路压线 */
+                if (black) hb &= (uint8_t)~(1u << i);    /* bit=0 表示该路压线 */
             }
         }
         bits_latch = hb;                                /* 滞回锁存给下一拍 */
