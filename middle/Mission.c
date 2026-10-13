@@ -933,6 +933,14 @@ void Mission_Run(void)
                     }
                     /* 启动失败 (IMU 正忙/没数据): 下一拍再试; 由本步 timeout_ms 兜底 (原样) */
                 }
+                else if (!ImuTurn_IsBusy())                    /* 转完 / 被中止: 打一行 (掉头唯一凭据) */
+                {
+                    /* r = 结束原因: 0 到位 / 1 被停 / 2 IMU 中途掉线 / 3 超时(8s 没转完) / 4 越走越远(被顶住)
+                     * e = 还差多少度 (带符号)   y = 当前航向 */
+                    printf("T180 r%d e%+d y%+d\r\n",
+                           ImuTurn_GetDoneReason(), (int)ImuTurn_GetDiff(), (int)ImuTurn_GetYaw());
+                    if (ImuTurn_GetDoneReason() != 0) ms_fail = 2;   /* 没转到位 -> 屏上报警 */
+                }
                 break;
             }
 
