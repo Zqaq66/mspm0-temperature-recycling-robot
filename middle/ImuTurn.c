@@ -40,6 +40,7 @@ static int      spot_phase      = SP_FAR;
 static char     spot_st         = 'D';    /* 本拍相位: D=远段定速 C=近段低速 B=断电等停稳 P=脉冲微调 */
 static int      errway_cnt      = 0;      /* 驱动段连续"远离目标"的拍数 (判方向反了) */
 static int      has_crossed     = 0;      /* 已经冲过目标了 -> 只收工, 绝不往回拉 */
+static float    total_deg       = 0.0f;   /* 本次命令的总角度 |delta| (判"是否真的冲过目标") */
 
 /* ---- 自标定 (掉电不保存, 重新上电从种子值重新学) ---- */
 static float    decel_est       = IMU_TURN_DECEL_DEF;       /* a: 减速能力 (度/秒^2) */
@@ -188,6 +189,7 @@ int ImuTurn_TurnDeg(int delta_deg, int speed)
     /* init_dir 要按【几何上实际往哪边转】定, 不能只按 delta 的正负:
      * 二者只在 |delta| 恰为 180 时不一致, 而那正是会全速切断的坑 (见 _norm180_turn) */
     init_dir        = (_norm180_turn(target_yaw - cur_yaw, turn_sign) >= 0.0f) ? 1 : -1;
+    total_deg       = _fabs((float)delta_deg);
     start_ms        = Get_Time();
     last_rx_bytes   = IMU_GetRxByteCount();
     last_rx_ms      = start_ms;
@@ -306,9 +308,13 @@ void ImuTurn_Update(void)
 
         if (rate > IMU_TURN_RATE_MAX) rate = IMU_TURN_RATE_MAX;   /* 夹野值 (只夹"预测用"的 rate) */
 
-        /* 冲过目标 (滑过头 / 方向被外部因素翻掉): 记住, 只收工, 绝不往回拉 */
-        if (((diff_deg > 0.0f) && (init_dir < 0)) ||
-            ((diff_deg < 0.0f) && (init_dir > 0))) has_crossed = 1;
+        /* 冲过目标 (滑过头 / 方向被外部因素翻掉): 记住, 只收工, 绝不往回拉。
+         * ★ 必须【已经转过大半程】才算 —— 否则一帧 yaw 毛刺就能把 diff 的符号翻过来,
+         *   当场判"冲过目标" -> 切断驱动 -> 再报"到位"。实测 (2026-10-13):
+         *   180 度掉头只转了 4 度就报 ARRIVED (T180 r0 e+176, 车没掉头)。 */
+        if (((total_deg - ad) > (total_deg * 0.5f)) &&
+            (((diff_deg > 0.0f) && (init_dir < 0)) ||
+             ((diff_deg < 0.0f) && (init_dir > 0)))) has_crossed = 1;
 
         /* 两处门限都由【本拍实测角速度】现算 —— "现在松手, 惯性正好滑到目标"的那一刻就松手。
          * ★ a 要【打折】(IMU_TURN_DECEL_TRUST): 过冲不可逆(冲过就收工), 差一点还能用脉冲补,
@@ -390,7 +396,11 @@ void ImuTurn_Update(void)
                         (IMU_TURN_PULSE_ENABLE == 0) || (pulse_cnt >= IMU_TURN_PULSE_MAX))
                     {
                         last_err = err;
-                        _finish(IMU_TURN_DONE_ARRIVED);
+                        /* "冲过目标"却差得离谱 = 中途出了岔子 (yaw 毛刺/被顶住): 按异常报,
+                         *   不谎报"到位", 免得状态机带着没转完的车往下走 */
+                        if (has_crossed && (err > IMU_TURN_OVERSHOOT_MAX_DEG))
+                             _finish(IMU_TURN_DONE_ERRWAY);
+                        else _finish(IMU_TURN_DONE_ARRIVED);
                         return;
                     }
 

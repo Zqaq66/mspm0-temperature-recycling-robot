@@ -217,6 +217,7 @@
 
 /* ---- 判据 / 保护 ---- */
 #define IMU_TURN_ARRIVE_DEG      4.0f  /* 停稳后落点认到位的窗口 (度)。要更准就收到 2~3 */
+#define IMU_TURN_OVERSHOOT_MAX_DEG 30.0f /* "冲过目标"却差得超过这么多 -> 判异常(不谎报到位) */
 #define IMU_TURN_RATE_MAX       400.0f /* 预测用的角速度上限 (夹野值, 防一帧跳变把预测撑爆) */
 #define IMU_TURN_RATE_STOP      25.0f  /* 角速度(度/秒)小于它 = 转速已很低, 算"停稳了" */
 #define IMU_TURN_RATE_STALE_MS   150   /* 超过这么久没有新的 yaw 帧 = 车没在动, 角速度按 0 算
