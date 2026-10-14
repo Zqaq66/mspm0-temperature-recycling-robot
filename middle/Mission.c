@@ -272,6 +272,7 @@ static uint8_t  ms_cross_phase      = 0;   /* MS_CROSS 相位: 0=循迹等到口子 1=前
 static uint32_t ms_cross_t0         = 0;   /* 盲走穿口起点 */
 static uint8_t  ms_thru_ok          = 0;   /* 盲走穿口里"线回到中间"的连续帧数 */
 static uint8_t  ms_busy             = 0;   /* 本拍动作没做完(自动转弯/前移中) -> 别判退出条件 */
+static uint8_t  ms_turn_half        = 0;   /* 掉头拆两次 90 度: 已经转完第一段 */
 
 /* ---- 转弯序列的状态 (定义放这里, 因为 Mission_Init/Start 里要复位它) ---- */
 #define TS_IDLE   0
@@ -921,26 +922,46 @@ void Mission_Run(void)
                                                            *   90 度   : 走统一转弯序列 (前移 + 转 + 找线兜底)
                                                            * ★ 拐弯一律用 MS_CROSS (方向写死在表里);
                                                            *   MS_TURN 只留给掉头这类"必须定角"的场合。 */
-            if ((s->arg >= 180) || (s->arg <= -180))       /* ---- 掉头: 直接原地转, 不前移 ---- */
+            if ((s->arg >= 180) || (s->arg <= -180))       /* ---- 掉头: 拆成两次 90 度转 ---- */
             {
-                if (!ms_turn_started)
+                /* ★ 不要把 180 度交给 ImuTurn 一次转: 它的"剩余角"是按【归一化差】算的,
+                 *   转 180 度会踩到 ±180 边界 —— 过半程后那个差的符号会自然翻过来,
+                 *   于是被"越走越远"判据中止。实测 (2026-10-13 两次上板): 掉头只转一半,
+                 *   T180 r4 e-81 / e-85。拆成两段 90 度永远不碰边界, 走已验证的那条路。 */
+                int hd = (s->arg > 0) ? +90 : -90;
+
+                if (!ms_turn_started)                          /* 第一段 90 */
                 {
-                    if (!ImuTurn_IsBusy() && (ImuTurn_TurnDeg((int)s->arg, 0) == 0))
+                    ms_turn_half = 0;
+                    if (!ImuTurn_IsBusy() && (ImuTurn_TurnDeg(hd, 0) == 0))
                     {
                         ms_turn_started = 1;
                         Track_Reset();
-                        printf("TGO %+d a-1\r\n", (int)s->arg);   /* a-1 = 直接转 (无前移/无序列) */
+                        printf("TGO %+d a-1 (1/2)\r\n", hd);
                     }
-                    /* 启动失败 (IMU 正忙/没数据): 下一拍再试; 由本步 timeout_ms 兜底 (原样) */
+                    ms_busy = 1;                               /* 起不来就下拍再试; 由本步 timeout 兜底 */
                 }
-                else if (!ImuTurn_IsBusy())                    /* 转完 / 被中止: 打一行 (掉头唯一凭据) */
+                else if (!ImuTurn_IsBusy())                    /* 一段转完 */
                 {
-                    /* r = 结束原因: 0 到位 / 1 被停 / 2 IMU 中途掉线 / 3 超时(8s 没转完) / 4 越走越远(被顶住)
-                     * e = 还差多少度 (带符号)   y = 当前航向 */
-                    printf("T180 r%d e%+d y%+d\r\n",
-                           ImuTurn_GetDoneReason(), (int)ImuTurn_GetDiff(), (int)ImuTurn_GetYaw());
-                    if (ImuTurn_GetDoneReason() != 0) ms_fail = 2;   /* 没转到位 -> 屏上报警 */
+                    if (ms_turn_half < 1)                      /* 还有第二段 90 */
+                    {
+                        if (ImuTurn_TurnDeg(hd, 0) == 0)
+                        {
+                            ms_turn_half = 1;
+                            printf("TGO %+d (2/2)\r\n", hd);
+                        }
+                        ms_busy = 1;
+                    }
+                    else                                       /* 两段都完 -> 报总结果 */
+                    {
+                        /* r = 结束原因: 0 到位 / 1 被停 / 2 IMU 掉线 / 3 超时 / 4 越走越远(被顶住)
+                         * e = 还差多少度   y = 当前航向 */
+                        printf("T180 r%d e%+d y%+d\r\n",
+                               ImuTurn_GetDoneReason(), (int)ImuTurn_GetDiff(), (int)ImuTurn_GetYaw());
+                        if (ImuTurn_GetDoneReason() != 0) ms_fail = 2;
+                    }
                 }
+                else ms_busy = 1;                              /* 正在转 */
                 break;
             }
 
