@@ -1,0 +1,16 @@
+(footprint "CAP-6.3x7.7"
+  (version 20240108)
+  (generator "pcbnew")
+  (layer "F.Cu")
+  (attr through_hole)
+  (fp_text reference "REF**" (at 0 -2.54) (layer "F.SilkS")
+    (effects (font (size 1 1) (thickness 0.15))))
+  (fp_text value "CAP-6.3x7.7" (at 0 2.54) (layer "F.Fab")
+    (effects (font (size 1 1) (thickness 0.15))))
+  (model "CAP-6.3x7.7.step"
+    (offset (xyz 0 0 0))
+    (scale (xyz 1 1 1))
+    (rotate (xyz 0 0 0)))
+  (pad "1" thru_hole oval (at -2.5 0) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask"))
+  (pad "2" thru_hole oval (at 2.5 0) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask"))
+)

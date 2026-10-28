@@ -29,6 +29,13 @@
 
 #define MS_BLIND_SPEED   250    /* MS_BLIND 没给 PWM 时的直行速度 */
 
+/* ---- MS_WORK 房间/工作区窗口 (2026-10-14 加语音播报后重定) ----
+ * 这一行 = 车停在房间前, 整个工作环节允许占用的时间上限:
+ *   语音开始播报 -> 等 WORK_PROMPT_MS (队员把手掌放上去) -> 测温/电量 -> 报"完成" -> 走
+ * 必须 >= empty.c 的 WORK_PROMPT_MS + 测温耗时, 否则工作没做完就被推进下一步。
+ * ★ 这是"往返 <= 60s"的主要开销 (4 个房间 × 这个窗口), 别随手往大调。 */
+#define MS_WORK_ROOM_MS 5000
+
 /* ---- MS_CROSS arg=0 "直行穿过" 的走法 ----
  * 盲走直行, 直到线重新回到阵列中间, 或到时限 —— 不用按车速标定固定毫秒数。
  * MS_THRU_MIN_MS: 至少盲走这么久 (先把口子的横杠甩到身后); MAX: 兜底上限。 */
@@ -189,26 +196,26 @@ static const MissionStep route[] =
   { MS_CROSS,        0,   MS_EX_NONE,       0,      400,  12000,  0,  "J2"   },
 /* -- 直行 = 进 1 号房间 --------------------------------------------------- */
   { MS_TRACK,        0,   MS_EX_ROOM,       0,      400,  12000,  0,  "T1"   },
-  { MS_WORK,         0,   MS_EX_TIME,    1500,      200,   8000,  1,  "WORK1"},
+  { MS_WORK,         0,   MS_EX_TIME, MS_WORK_ROOM_MS, 200,   8000,  1,  "WORK1"},
 /* -- 掉头 -> 退回右上角丁字口, 左拐 90 下右腿 ----------------------------- */
   { MS_TURN,      +180,   MS_EX_TURN,       0,      200,   9000,  0,  "U180" },
   { MS_CROSS,       -1,   MS_EX_NONE,       0,      400,  12000,  0,  "R1"   },
 /* -- 右腿 1m -> 2 号房间丁字口, 左拐进支线 ------------------------------- */
   { MS_CROSS,       -1,   MS_EX_NONE,       0,      400,  12000,  0,  "J3"   },
   { MS_TRACK,        0,   MS_EX_ROOM,       0,      400,  12000,  0,  "T2"   },
-  { MS_WORK,         0,   MS_EX_TIME,    1500,      200,   8000,  2,  "WORK2"},
+  { MS_WORK,         0,   MS_EX_TIME, MS_WORK_ROOM_MS, 200,   8000,  2,  "WORK2"},
   { MS_TURN,      +180,   MS_EX_TURN,       0,      200,   9000,  0,  "U180" },
   { MS_CROSS,       -1,   MS_EX_NONE,       0,      400,  12000,  0,  "R2"   },
 /* -- 右腿 1m -> 3 号房间丁字口, 左拐进支线 ------------------------------- */
   { MS_CROSS,       -1,   MS_EX_NONE,       0,      400,  12000,  0,  "J4"   },
   { MS_TRACK,        0,   MS_EX_ROOM,       0,      400,  12000,  0,  "T3"   },
-  { MS_WORK,         0,   MS_EX_TIME,    1500,      200,   8000,  3,  "WORK3"},
+  { MS_WORK,         0,   MS_EX_TIME, MS_WORK_ROOM_MS, 200,   8000,  3,  "WORK3"},
   { MS_TURN,      +180,   MS_EX_TURN,       0,      200,   9000,  0,  "U180" },
   { MS_CROSS,       -1,   MS_EX_NONE,       0,      400,  12000,  0,  "R3"   },
 /* -- 右腿到底 -> 左拐进 4 号房间 -> 循迹到房间口 -------------------------- */
   { MS_CORNER,      -1,   MS_EX_NONE,       0,      200,  12000,  0,  "C4"   },
   { MS_TRACK,        0,   MS_EX_ROOM,       0,      400,  12000,  0,  "T4"   },
-  { MS_WORK,         0,   MS_EX_TIME,    1500,      200,   8000,  4,  "WORK4"},
+  { MS_WORK,         0,   MS_EX_TIME, MS_WORK_ROOM_MS, 200,   8000,  4,  "WORK4"},
 /* -- 掉头 -> 出 4 号房间, 右拐 90 回右腿 --------------------------------- */
   { MS_TURN,      +180,   MS_EX_TURN,       0,      200,   9000,  0,  "U180" },
   { MS_CORNER,      +1,   MS_EX_NONE,       0,      200,  12000,  0,  "C5"   },
@@ -307,6 +314,7 @@ static uint8_t  ms_fail      = 0;      /* 0=正常 1=找线失败(NOLINE) 2=转弯序列超
  * 弱钩子: 默认空实现; 在 empty.c 里同名再写一遍就覆盖了 (不用改本文件)
  *-------------------------------------------------------------------------*/
 __attribute__((weak)) void Mission_OnWork(int room)      { (void)room; }
+__attribute__((weak)) void Mission_OnWorkTick(int room, uint32_t elapsed_ms) { (void)room; (void)elapsed_ms; }
 __attribute__((weak)) void Mission_OnStepEnter(int step) { (void)step; }
 __attribute__((weak)) void Mission_OnDone(void)          { }
 
@@ -1000,6 +1008,9 @@ void Mission_Run(void)
                 ms_step_t0      = now;                    /* 工作计时从这里开始 */
                 Mission_OnWork((int)s->room);
             }
+            /* 每拍再回调一次: 让"播报 -> 等 N 秒 -> 测温 -> 报完成"能写成非阻塞状态机,
+             * 不用在钩子里死等 (死等会把协作式调度连同急停一起卡住) */
+            Mission_OnWorkTick((int)s->room, (uint32_t)(now - ms_step_t0));
             break;
 
         default:

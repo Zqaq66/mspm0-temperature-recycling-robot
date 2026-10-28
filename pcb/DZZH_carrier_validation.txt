@@ -1,0 +1,8 @@
+KiCad schematic validation
+  file      : D:\TI_Keil\M0_SDK\mspm0_sdk_2_02_00_05\DZZH_Project\pcb\DZZH_carrier.kicad_sch
+  components: 43
+  symbols   : 43
+  nets      : 64
+  labels    : 192
+  NC pins   : 8
+  result    : PASS

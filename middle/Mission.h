@@ -134,6 +134,7 @@ int  Mission_GetTurnAdvGone(void);     /* 1 = 前移时就发现"主线没了" -> 这个口其
 /* ---------------- 弱钩子 (在 empty.c 里覆盖即可, 这里是空实现) ----------------
  * ★ 别在里面长时间阻塞 (5ms 任务里): 要等就靠 MS_WORK 步的 arg 毫秒 */
 void Mission_OnWork(int room);         /* 到房间/工作区的工作环节 (测温/语音/LCD/LORA) */
+void Mission_OnWorkTick(int room, uint32_t elapsed_ms); /* 同上, 但每拍(5ms)调一次: 把工作环节写成非阻塞定时流程 */
 void Mission_OnStepEnter(int step);    /* 每一步开始时 (打串口日志用) */
 void Mission_OnDone(void);             /* 任务全部完成 */
 
